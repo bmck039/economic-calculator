@@ -37,6 +37,56 @@ container `HOST`, `PORT` (8501), `OPEN_BROWSER` and `BASE_URL_PATH` (`econ`) are
 tunnel's public hostname uses path `econ` and service `http://econ:8501`. To refresh the
 data: `docker compose exec econ python run.py data`, then `docker compose restart econ`.
 
+### Deploying (automatic updates with doco-cd)
+
+On the server, [doco-cd](https://github.com/kimdre/doco-cd) keeps the stack on the latest
+stable release. Publishing a GitHub release runs the tests
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) and, if they pass,
+moves the `release` branch to it. doco-cd polls that branch and runs the equivalent of
+`docker compose up -d --build`, so code, `Dockerfile` and `compose.yaml` changes all
+apply. Plain commits and pre-releases deploy nothing. The data volume is kept, and
+cloudflared is updated to its latest image at each deploy. The container runs the full
+test suite on its first start with each new version.
+
+One doco-cd instance serves every project. On the server (e.g. `~/docker/doco-cd/`):
+
+```yaml
+# compose.yaml
+services:
+  doco-cd:
+    image: ghcr.io/kimdre/doco-cd:latest
+    restart: unless-stopped
+    environment:
+      TZ: America/New_York
+      POLL_CONFIG: |
+        - url: https://github.com/bmck039/economic-calculator.git
+          reference: release
+          interval: 15m
+        # one entry per project
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - data:/data
+      - ./secrets:/secrets:ro      # one env file per project, never in git
+    healthcheck:
+      start_period: 15s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  data:
+```
+
+Copy this project's `config.env` to `secrets/econ-calculator.env` next to that file
+([`.doco-cd.yml`](.doco-cd.yml) points the stack at it), then `docker compose up -d`.
+doco-cd deploys the current release within a minute and then checks every 15 minutes.
+`docker logs -f doco-cd-doco-cd-1` shows what it does. If a stack started by hand with
+`docker compose up` is running, stop it first (`docker compose down`, which keeps the data).
+
+On macOS with Docker Desktop, enable *Start Docker Desktop when you sign in* and, under
+Settings → Advanced, *Allow the default Docker socket to be used*.
+
+**To ship a change:** push it, then publish a GitHub release (e.g. tag `v0.2.0`).
+
 Manual equivalent: `pip install -r requirements.txt`, `python build_econ_dataset.py`,
 `streamlit run app.py`, `pytest -q`. Useful pipeline flags: `--derive-only` (rebuild the derived tables from the last
 `econ_long.csv`, no network, ~2 min), `--profile` (cProfile top 25), `--refresh`,

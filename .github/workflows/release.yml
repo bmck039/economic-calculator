@@ -1,0 +1,44 @@
+# Tests every push. When a stable release is published, also moves the `release` branch to
+# it; doco-cd on the server follows that branch (see README, "Deploying").
+name: test and release
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # The UI smoke tests need the built data and are skipped here; the container runs
+      # the full suite on its first start with the new version.
+      - run: python -m pytest -q -p no:cacheprovider tests
+
+  deploy:
+    needs: test
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Point the release branch at the latest stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [ "$latest" != "$TAG" ]; then
+            echo "$TAG is not the latest release ($latest); leaving the release branch alone"
+            exit 0
+          fi
+          git push --force origin "refs/tags/$TAG^{commit}:refs/heads/release"

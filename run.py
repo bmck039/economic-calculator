@@ -160,7 +160,7 @@ def build_data(py: Path, refresh: bool) -> None:
 
 def run_tests(py: Path) -> bool:
     say("running tests")
-    return run(py, "-m", "pytest", "-q", "tests") == 0
+    return run(py, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests") == 0
 
 
 def start_app(py: Path, cfg: dict[str, str]) -> int:
@@ -207,11 +207,17 @@ def main() -> None:
         sys.exit(0 if run_tests(py) else 1)
 
     missing = missing_tables()
-    if missing:
+    built = False
+    retry = DATA_DIR / ".rebuild"   # tests failed right after a build: a source probably timed out
+    if retry.exists() and not missing and a.command in ("run", "setup"):
+        say("the last data build failed its tests; rebuilding (downloads already cached are reused)")
+        build_data(py, a.refresh)
+        changed = built = True
+    elif missing:
         if a.command == "start":
             die(f"no data yet (missing: {', '.join(missing)}). Run `python run.py setup` first")
         build_data(py, a.refresh)
-        changed = True
+        changed = built = True
     else:
         age = (time.time() - (DATA_DIR / "earnings_profile.csv").stat().st_mtime) / 86400
         if age > 90:
@@ -227,7 +233,10 @@ def main() -> None:
             say("skipping tests (--no-test)")
         elif run_tests(py):
             marker.touch()
+            retry.unlink(missing_ok=True)
         else:
+            if built:
+                retry.touch()               # the next start rebuilds the data before testing
             die("tests failed (see above). Fix them, or start anyway with `python run.py start`")
 
     if a.command == "setup":

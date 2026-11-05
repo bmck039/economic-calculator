@@ -10,3 +10,5 @@ first_run_output.txt
 .dockerignore
 Dockerfile
 compose.yaml
+.doco-cd.yml
+.github

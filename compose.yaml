@@ -4,15 +4,24 @@
 #   docker compose logs -f econ     watch the first-start data build (~10-20 min)
 #   docker compose down             stop (the data volume is kept)
 #
+# On the server, doco-cd runs this file for you on every release (see README, "Deploying").
+# It has no config.env in its copy of the repo, so .doco-cd.yml points ECON_CONFIG at one.
+#
 # Cloudflare dashboard -> your tunnel -> Public hostname: path `econ`,
 # service type HTTP, URL `econ:8501`.
+x-config: &config
+  env_file:
+    - path: ${ECON_CONFIG:-config.env}
+      required: false
+
 services:
   econ:
     build: .
     image: econ-calculator
+    pull_policy: build              # built here, never pulled from a registry
     restart: unless-stopped
     init: true                      # clean signal handling and child reaping for PID 1
-    env_file: config.env
+    <<: *config
     environment:                    # container-specific overrides of config.env
       HOST: 0.0.0.0
       PORT: "8501"
@@ -27,8 +36,9 @@ services:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
     command: tunnel --no-autoupdate run
-    env_file: config.env            # cloudflared reads TUNNEL_TOKEN from it
+    <<: *config                     # cloudflared reads TUNNEL_TOKEN from it
     depends_on: [econ]
 
 volumes:
   econ-data:
+    name: econ-calculator-data      # the same volume whether doco-cd or you start the stack
