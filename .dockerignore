@@ -10,3 +10,5 @@ first_run_output.txt
 .dockerignore
 Dockerfile
 compose.yaml
+docker_autoupdate.py
+.state

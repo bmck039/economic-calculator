@@ -9,3 +9,4 @@
 # Ignore economic data directory
 econ_data/
 config.env
+.state

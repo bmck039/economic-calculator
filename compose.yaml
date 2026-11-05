@@ -2,7 +2,10 @@
 #
 #   docker compose up -d --build    start; both restart automatically whenever Docker runs
 #   docker compose logs -f econ     watch the first-start data build (~10-20 min)
-#   docker compose down             stop (the data volume is kept)
+#   docker compose down             stop (the state volume is kept)
+#
+# The app follows the latest stable GitHub release (AUTO_UPDATE): each new release is set
+# up and tested in the background and only replaces the running version if it passes.
 #
 # Cloudflare dashboard -> your tunnel -> Public hostname: path `econ`,
 # service type HTTP, URL `econ:8501`.
@@ -18,8 +21,11 @@ services:
       PORT: "8501"
       OPEN_BROWSER: "false"
       BASE_URL_PATH: econ           # must match the tunnel's path: https://benmckallip.com/econ
+      AUTO_UPDATE: "true"           # UPDATE_REPO / UPDATE_CHECK_HOURS can be set in config.env
+      ECON_STATE_DIR: /state        # releases + their data
+      ECON_CACHE_DIR: /state/cache  # download cache shared by all releases
     volumes:
-      - econ-data:/app/econ_data    # downloaded + derived data survives rebuilds
+      - econ-state:/state
     # Uncomment to also reach it from this machine at http://localhost:8501/econ/
     # ports: ["127.0.0.1:8501:8501"]
 
@@ -31,4 +37,4 @@ services:
     depends_on: [econ]
 
 volumes:
-  econ-data:
+  econ-state:

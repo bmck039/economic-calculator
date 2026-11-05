@@ -33,9 +33,34 @@ docker compose down              # stop (data volume kept; `down -v` deletes it)
 
 The container runs `python run.py`, so setup behaves exactly as above. Inside the
 container `HOST`, `PORT` (8501), `OPEN_BROWSER` and `BASE_URL_PATH` (`econ`) are set in
-`compose.yaml`; everything else comes from `config.env`. In the Cloudflare dashboard, the
-tunnel's public hostname uses path `econ` and service `http://econ:8501`. To refresh the
-data: `docker compose exec econ python run.py data`, then `docker compose restart econ`.
+`compose.yaml`; everything else comes from `config.env`.
+
+**Auto-update.** The container follows the latest *stable* GitHub release of
+`UPDATE_REPO` (drafts and pre-releases are ignored), checking every `UPDATE_CHECK_HOURS`.
+A new release is downloaded into the `econ-state` volume and set up there by its own
+`run.py setup` (packages, a fresh data build from the shared download cache, the tests)
+while the current version keeps serving. Only if all of that passes does the app switch,
+with a few seconds of downtime. A failing release is retried at the next two checks
+(a data source may just have timed out) and then skipped until a newer one is published.
+If the tests fail right after a data build, the next start rebuilds the data (reusing
+what was already downloaded) instead of failing the same way again. Each release also
+rebuilds the data, so publishing one is also how to refresh it.
+
+**Docker setup changes.** The container can't rebuild its own image, so changes to the
+`Dockerfile`, `compose.yaml` or `.dockerignore` are applied on the host by
+[docker-autoupdate](https://github.com/bmck039/docker-auto-update), vendored here as
+`docker_autoupdate.py`. On the server, in a dedicated clone of this repo (on macOS
+outside `~/Documents`, `~/Desktop` and `~/Downloads`), run once:
+
+```
+python3 docker_autoupdate.py install
+```
+
+Every 6 hours it checks for a new stable release. It checks the clone out at that tag
+and, only if the release changed the Docker setup, runs `docker compose up -d --build`;
+a failed rebuild is rolled back. Code-only releases are left to the in-container updater.
+
+**To ship a change:** push it, then publish a GitHub release (e.g. tag `v1.2.0`).
 
 Manual equivalent: `pip install -r requirements.txt`, `python build_econ_dataset.py`,
 `streamlit run app.py`, `pytest -q`. Useful pipeline flags: `--derive-only` (rebuild the derived tables from the last

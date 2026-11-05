@@ -9,10 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
-# Unprivileged user; it owns only the venv (for run.py's install stamp) and the data folder.
+# Unprivileged user; it owns only the venv (run.py installs a release's requirements there),
+# the data folder and /state (the volume holding downloaded releases and the download cache).
 RUN useradd --create-home --uid 1000 app \
- && mkdir -p /opt/venv /app/econ_data \
- && chown app:app /opt/venv /app/econ_data
+ && mkdir -p /opt/venv /app/econ_data /state \
+ && chown app:app /opt/venv /app/econ_data /state
 USER app
 WORKDIR /app
 
@@ -23,7 +24,7 @@ RUN python -m venv /opt/venv && pip install --no-compile -r requirements.txt
 
 COPY . .
 
-# Data is built on first start into the econ_data volume (~10-20 min), so allow a long start.
+# The first start downloads the latest release and builds its data (~10-20 min).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40m --retries=3 CMD python -c \
   "import os, urllib.request as u; b = os.environ.get('BASE_URL_PATH', '').strip('/'); \
    u.urlopen('http://localhost:%s/%s_stcore/health' % (os.environ.get('PORT', '8501'), b + '/' if b else ''), timeout=4)"
