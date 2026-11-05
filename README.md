@@ -39,8 +39,8 @@ data: `docker compose exec econ python run.py data`, then `docker compose restar
 
 ### Deploying (automatic updates with doco-cd)
 
-On the server, [doco-cd](https://github.com/kimdre/doco-cd) keeps the stack on the latest
-stable release. Publishing a GitHub release runs the tests
+On the machine that hosts the site, [doco-cd](https://github.com/kimdre/doco-cd) keeps the
+stack on the latest stable release of the repo it follows (this one, or your fork). Publishing a GitHub release runs the tests
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) and, if they pass,
 moves the `release` branch to it. doco-cd polls that branch and runs the equivalent of
 `docker compose up -d --build`, so code, `Dockerfile` and `compose.yaml` changes all
@@ -48,7 +48,8 @@ apply. Plain commits and pre-releases deploy nothing. The data volume is kept, a
 cloudflared is updated to its latest image at each deploy. The container runs the full
 test suite on its first start with each new version.
 
-One doco-cd instance serves every project. On the server (e.g. `~/docker/doco-cd/`):
+One doco-cd instance serves every project on the machine. Put this in a folder of its own
+(e.g. `~/docker/doco-cd/`), outside any project:
 
 ```yaml
 # compose.yaml
@@ -57,9 +58,9 @@ services:
     image: ghcr.io/kimdre/doco-cd:latest
     restart: unless-stopped
     environment:
-      TZ: America/New_York
+      TZ: Etc/UTC                    # your time zone, for the log timestamps
       POLL_CONFIG: |
-        - url: https://github.com/bmck039/economic-calculator.git
+        - url: https://github.com/bmck039/economic-calculator.git   # or your fork
           reference: release
           interval: 15m
         # one entry per project
@@ -82,8 +83,15 @@ doco-cd deploys the current release within a minute and then checks every 15 min
 `docker logs -f doco-cd-doco-cd-1` shows what it does. If a stack started by hand with
 `docker compose up` is running, stop it first (`docker compose down`, which keeps the data).
 
-On macOS with Docker Desktop, enable *Start Docker Desktop when you sign in* and, under
-Settings → Advanced, *Allow the default Docker socket to be used*.
+Platform notes for the doco-cd host:
+
+* **Linux:** nothing extra with Docker Engine; it starts at boot if the `docker` service
+  is enabled (`sudo systemctl enable docker`).
+* **macOS and Windows (Docker Desktop):** enable *Start Docker Desktop when you sign in*
+  (Docker then runs only while you're signed in, so use automatic sign-in on a machine
+  that should serve the site unattended). On macOS also enable *Settings → Advanced →
+  Allow the default Docker socket to be used*. On Windows use the WSL 2 backend with Linux
+  containers (the default); the `/var/run/docker.sock` mount works as written.
 
 **To ship a change:** push it, then publish a GitHub release (e.g. tag `v0.2.0`).
 

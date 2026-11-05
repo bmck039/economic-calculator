@@ -26,7 +26,7 @@ services:
       HOST: 0.0.0.0
       PORT: "8501"
       OPEN_BROWSER: "false"
-      BASE_URL_PATH: econ           # must match the tunnel's path: https://benmckallip.com/econ
+      BASE_URL_PATH: econ           # must match the tunnel's path, e.g. https://example.com/econ
     volumes:
       - econ-data:/app/econ_data    # downloaded + derived data survives rebuilds
     # Uncomment to also reach it from this machine at http://localhost:8501/econ/

@@ -4,6 +4,8 @@
 *.pyo
 *.pyd
 
+.claude/
+
 .pytest_cache/
 
 # Ignore economic data directory
