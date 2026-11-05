@@ -1,0 +1,12 @@
+# Keep the image small and secrets out of it (config.env is passed in at runtime).
+.venv
+econ_data
+**/__pycache__
+.pytest_cache
+*.env
+first_run_output.txt
+.git
+.gitignore
+.dockerignore
+Dockerfile
+compose.yaml

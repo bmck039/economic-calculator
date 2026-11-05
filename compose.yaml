@@ -1,0 +1,34 @@
+# Website mode: the app plus a Cloudflare Tunnel. Settings come from config.env.
+#
+#   docker compose up -d --build    start; both restart automatically whenever Docker runs
+#   docker compose logs -f econ     watch the first-start data build (~10-20 min)
+#   docker compose down             stop (the data volume is kept)
+#
+# Cloudflare dashboard -> your tunnel -> Public hostname: path `econ`,
+# service type HTTP, URL `econ:8501`.
+services:
+  econ:
+    build: .
+    image: econ-calculator
+    restart: unless-stopped
+    init: true                      # clean signal handling and child reaping for PID 1
+    env_file: config.env
+    environment:                    # container-specific overrides of config.env
+      HOST: 0.0.0.0
+      PORT: "8501"
+      OPEN_BROWSER: "false"
+      BASE_URL_PATH: econ           # must match the tunnel's path: https://benmckallip.com/econ
+    volumes:
+      - econ-data:/app/econ_data    # downloaded + derived data survives rebuilds
+    # Uncomment to also reach it from this machine at http://localhost:8501/econ/
+    # ports: ["127.0.0.1:8501:8501"]
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file: config.env            # cloudflared reads TUNNEL_TOKEN from it
+    depends_on: [econ]
+
+volumes:
+  econ-data:
