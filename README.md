@@ -32,9 +32,8 @@ docker compose down              # stop (data volume kept; `down -v` deletes it)
 ```
 
 The container runs `python run.py`, so setup behaves exactly as above. Inside the
-container `HOST`, `PORT` (8501), `OPEN_BROWSER` and `BASE_URL_PATH` (`econ`) are set in
-`compose.yaml`; everything else comes from `config.env`. In the Cloudflare dashboard, the
-tunnel's public hostname uses path `econ` and service `http://econ:8501`. To refresh the
+container `HOST` and `PORT` (8501) come from `compose.yaml`; everything else comes from `config.env`. In the Cloudflare dashboard, the
+tunnel's public hostname uses path in `config.env` and service `http://econ:8501`. To refresh the
 data: `docker compose exec econ python run.py data`, then `docker compose restart econ`.
 
 ### Deploying (automatic updates with doco-cd)
