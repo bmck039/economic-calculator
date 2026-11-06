@@ -85,6 +85,12 @@ Usage
   python build_econ_dataset.py --home-m2 110   # size of the home used for prices
   python build_econ_dataset.py --reference my_refs.csv
   Optional: set CENSUS_API_KEY (free) for ACS rents; without it the US rent is a reference value.
+  Optional: set FRED_API_KEY (free) to read FRED series through the official API instead of
+  the fredgraph.csv download endpoint.
+
+Exit status: 0 all sources fetched; 2 some sources failed but every country still has the
+tables the app needs (fallbacks used); 1 fatal - nothing written except fetch_log.csv, any
+previous build in --out is left untouched.
 
 READ THE COMPARABILITY NOTES. Every row says what population, period and
 definition it uses. Mixing sources is fine for "accurate-enough" pictures,
@@ -156,6 +162,11 @@ LOCAL_CURRENCY = {"USA": "USD", "CAN": "CAD", "GBR": "GBP", "CHE": "CHF", "NOR":
                   "BGR": "BGN"}
 
 USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
+
+# Bump when a pipeline change means tables built by older code must be rebuilt (run.py
+# compares it with <out>/.data-version, which a successful build writes).
+#   2: FRED fix - builds before it could silently lack all US earnings (no USA rows).
+DATA_VERSION = "2"
 
 # ==========================================================================
 # Comparability notes
@@ -451,6 +462,7 @@ class CachedFetcher:
     min_interval: dict[str, float] = field(default_factory=lambda: {
         "sdmx.oecd.org": 4.0,          # OECD rate-limits anonymous use hard
         "fred.stlouisfed.org": 1.0,
+        "api.stlouisfed.org": 0.6,     # FRED API: 120 requests/minute per key
         "www150.statcan.gc.ca": 1.0,
         "www.ons.gov.uk": 2.5,         # ONS returns HTTP 429 below ~2s spacing
         "api.census.gov": 1.0,
@@ -510,6 +522,7 @@ class CachedFetcher:
 
         host = urlparse(full).netloc
         if self._host_fails.get(host, 0) >= self.host_fail_limit:
+            self._log(label, full, "skipped")
             return self._fallback(body_p, label, full,
                                   FetchError(f"{host} skipped: failed {self.host_fail_limit}x"))
         last_err: Exception | None = None
@@ -538,7 +551,7 @@ class CachedFetcher:
                     raise FetchError(f"unexpected response body: {r.content[:160]!r}")
                 body_p.write_bytes(r.content)
                 meta_p.write_text(json.dumps({
-                    "url": full, "fetched_ts": time.time(),
+                    "url": redact(full), "fetched_ts": time.time(),
                     "fetched_utc": datetime.now(timezone.utc).isoformat(),
                     "bytes": len(r.content), "label": label,
                 }))
@@ -565,11 +578,16 @@ class CachedFetcher:
             log.warning("Using STALE cache for %s (%s)", label or full, err)
             self._log(label, full, "stale-cache", error=str(err))
             return body_p.read_bytes()
-        raise FetchError(f"{full}: {err}")
+        raise FetchError(f"{redact(full)}: {err}")
 
     def _log(self, label: str, url: str, how: str, **kw) -> None:
-        self.log_rows.append({"label": label, "url": url, "how": how,
+        self.log_rows.append({"label": label, "url": redact(url), "how": how,
                               "time_utc": datetime.now(timezone.utc).isoformat(), **kw})
+
+
+def redact(url: str) -> str:
+    """Hide API keys in URLs that end up in logs, fetch_log.csv and cache metadata."""
+    return re.sub(r"([?&](?:api_key|key)=)[^&]+", r"\1***", url)
 
 
 def is_json(b: bytes) -> bool:
@@ -743,10 +761,48 @@ def oecd(f: CachedFetcher, flow: str, dims: list[str], filters: dict[str, list[s
 
 
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+FRED_API = "https://api.stlouisfed.org/fred/series/observations"
+# fred.stlouisfed.org's edge can hold a request open until the read times out depending on
+# the User-Agent: from one home network, this pipeline's UA and "Mozilla/5.0" stalled every
+# time while requests' default UA (and curl) got a 200 in <1 s. So the CSV endpoint gets the
+# default UA, and a short read timeout so a stall costs seconds, not the whole FRED budget.
+FRED_CSV_HEADERS = {"User-Agent": requests.utils.default_user_agent()}
+FRED_CSV_TIMEOUT = 20
 
 
 def fred(f: CachedFetcher, series_id: str) -> pd.DataFrame:
-    raw = f.get(FRED_CSV, {"id": series_id}, label=f"fred:{series_id}")
+    """One FRED series as date/value. Uses the official API when FRED_API_KEY is set (falls
+    back to the CSV endpoint if the API fails), otherwise the fredgraph.csv endpoint."""
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    api_host = urlparse(FRED_API).netloc
+    if key and f._host_fails.get(api_host, 0) < f.host_fail_limit:
+        try:
+            raw = f.get(FRED_API, {"series_id": series_id, "api_key": key, "file_type": "json"},
+                        label=f"fred-api:{series_id}", validate=is_json, timeout=30)
+            return fred_api_frame(raw, series_id)
+        except FetchError as e:
+            if "api_key" in str(e):  # bad key: say so once, then use the CSV endpoint
+                log.error("FRED_API_KEY was rejected (%s); using the CSV endpoint", str(e)[:200])
+                f._host_fails[api_host] = f.host_fail_limit
+            else:
+                log.warning("FRED API %s failed (%s); trying the CSV endpoint", series_id, e)
+    raw = f.get(FRED_CSV, {"id": series_id}, label=f"fred:{series_id}",
+                headers=FRED_CSV_HEADERS, timeout=FRED_CSV_TIMEOUT)
+    return fred_csv_frame(raw, series_id)
+
+
+def fred_api_frame(raw: bytes, series_id: str) -> pd.DataFrame:
+    obs = json.loads(raw).get("observations")
+    if obs is None:
+        raise FetchError(f"FRED API {series_id}: no observations in the response")
+    df = pd.DataFrame(obs, columns=["date", "value"]) if obs else \
+        pd.DataFrame(columns=["date", "value"])
+    df = df[["date", "value"]].astype({"date": str})
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")  # FRED uses "." for NA
+    return df.dropna()
+
+
+def fred_csv_frame(raw: bytes, series_id: str) -> pd.DataFrame:
     head = raw[:40].lstrip(b"\xef\xbb\xbf").lower()
     if not (head.startswith(b"observation_date") or head.startswith(b"date")):
         raise FetchError(f"FRED {series_id}: not a CSV (series may not exist)")
@@ -3774,7 +3830,27 @@ def main(argv: list[str] | None = None) -> int:
     derived["country_snapshot"] = timed("country_snapshot", lambda: derive_snapshot(
         long, ctx, derived["couple_budget"], derived["life_events"], derived["earnings_ppp"]))
 
+    status_df = pd.DataFrame(status, columns=["module", "source", "status", "rows", "error"])
+    missing = missing_countries(derived)
+    if missing and not a.only:
+        # Writing these tables would silently drop countries from the app (as a FRED outage
+        # once dropped the United States). Keep whatever the last good build left in --out.
+        pd.DataFrame(f.log_rows).to_csv(a.out / "fetch_log.csv", index=False)
+        print("\nSummary")
+        print(status_df.to_string(index=False))
+        print_failed_requests(f.log_rows)
+        log.error("BUILD FAILED: no earnings profile and/or tax curve for %s. The app would "
+                  "not offer these countries, so nothing was written (a previous build in %s "
+                  "is untouched). Check the failed sources above; FRED feeds US earnings "
+                  "(set FRED_API_KEY to use its API).",
+                  ", ".join(f"{COUNTRIES[c][2]} ({c})" for c in missing), a.out)
+        return 1
+    if missing:
+        log.warning("--only build: no earnings/tax rows for %s", ", ".join(missing))
+
     t0 = time.time()
+    stamp = a.out / ".data-version"
+    stamp.unlink(missing_ok=True)  # an interrupted write leaves no stamp -> run.py rebuilds
     if not a.derive_only:  # unchanged in --derive-only mode (and ~1 min to write)
         write(long, a.out / "econ_long")
         write(to_annual(long), a.out / "econ_annual")
@@ -3798,13 +3874,48 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nTotal derive+write: {time.time() - t_derive:.1f}s")
 
     print("\nSummary")
-    print(pd.DataFrame(status, columns=["module", "source", "status", "rows", "error"])
-          .to_string(index=False))
+    print(status_df.to_string(index=False))
+    print_failed_requests(f.log_rows)
     cov = long.groupby("measure")["iso3"].nunique()
     print(f"\nCountries covered per measure (of {len(COUNTRIES)}):")
     print(cov.to_string())
+    if not a.only:
+        stamp.write_text(DATA_VERSION + "\n")
     print(f"\nWrote {a.out.resolve()}")
-    return 0 if all(s[2] == "ok" for s in status) else 2
+    failed = status_df[status_df["status"] != "ok"]
+    if not failed.empty:
+        log.warning("%d source(s) failed (%s); fallbacks were used. Every country still has "
+                    "earnings and tax data.", len(failed), ", ".join(failed["source"]))
+        return 2
+    return 0
+
+
+def missing_countries(derived: dict[str, pd.DataFrame]) -> list[str]:
+    """Countries the app would not offer: it needs earnings_profile and tax_curve rows."""
+    have = None
+    for name in ("earnings_profile", "tax_curve"):
+        df = derived.get(name)
+        got = set(df["iso3"]) if df is not None and "iso3" in df else set()
+        have = got if have is None else have & got
+    return sorted(set(COUNTRIES) - have)
+
+
+def print_failed_requests(log_rows: list[dict]) -> None:
+    """Requests that never got data from the network (timeouts, errors, skipped hosts)."""
+    net = pd.DataFrame(log_rows)
+    if net.empty:
+        return
+    ok = set(net.loc[net["how"].isin(["cache", "network"]), "url"])
+    bad = net[~net["how"].isin(["cache", "network"]) & ~net["url"].isin(ok)] \
+        .drop_duplicates("url", keep="last")
+    if bad.empty:
+        return
+    bad = bad.assign(host=bad["url"].map(lambda u: urlparse(u).netloc))
+    print(f"\nRequests that got no fresh data ({len(bad)}; stale cache or nothing used)")
+    for (host, how), g in bad.groupby(["host", "how"]):
+        labels = [str(x) for x in g["label"]]
+        more = f" (+{len(labels) - 6} more)" if len(labels) > 6 else ""
+        print(f"  {host:<28} {how:<12} {len(g):>3}  {', '.join(labels[:6])}{more}")
 
 
 if __name__ == "__main__":

@@ -46,7 +46,8 @@ moves the `release` branch to it. doco-cd polls that branch and runs the equival
 `docker compose up -d --build`, so code, `Dockerfile` and `compose.yaml` changes all
 apply. Plain commits and pre-releases deploy nothing. The data volume is kept, and
 cloudflared is updated to its latest image at each deploy. The container runs the full
-test suite on its first start with each new version.
+test suite on its first start with each new version. A release that bumps `DATA_VERSION` also rebuilds
+the data on its first start (reusing cached downloads).
 
 One doco-cd instance serves every project on the machine. Put this in a folder of its own
 (e.g. `~/docker/doco-cd/`), outside any project:
@@ -100,6 +101,16 @@ Manual equivalent: `pip install -r requirements.txt`, `python build_econ_dataset
 `econ_long.csv`, no network, ~2 min), `--profile` (cProfile top 25), `--refresh`,
 `--reference my_refs.csv`. Set `CENSUS_API_KEY` (free) to get ACS rents; without it the
 US rent comes from `reference_values.csv`.
+Set `FRED_API_KEY` (free, [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html))
+to read the US series (CPS earnings, JOLTS, CE spending, housing) through FRED's API;
+without it they come from FRED's CSV endpoint.
+
+The build exits 1, without touching the previous tables, if any country would end up
+without earnings or tax data (the app could not offer it); it exits 2 when only some sources
+failed and fell back to cached or reference values. A complete build stamps
+`econ_data/.data-version`; `python run.py` rebuilds whenever that stamp is missing or older
+than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be rebuilt).
+`FRED_SMOKE=1 pytest tests/test_fred.py` checks the live FRED endpoints.
 
 ## Layout
 

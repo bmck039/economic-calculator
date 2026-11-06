@@ -150,12 +150,39 @@ def missing_tables() -> list[str]:
             if not (DATA_DIR / f"{t}.csv").exists() or (DATA_DIR / f"{t}.csv").stat().st_size == 0]
 
 
-def build_data(py: Path, refresh: bool) -> None:
+def data_version_wanted() -> str:
+    """DATA_VERSION from build_econ_dataset.py (read as text: this script needs no pandas)."""
+    m = re.search(r'^DATA_VERSION = "([^"]+)"', (ROOT / "build_econ_dataset.py")
+                  .read_text(encoding="utf-8"), re.M)
+    return m.group(1) if m else ""
+
+
+def data_version_built() -> str:
+    """The stamp a complete, successful build leaves; '' if none (failed, interrupted,
+    partial or built by a version before the stamp existed)."""
+    try:
+        return (DATA_DIR / ".data-version").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def build_data(py: Path, refresh: bool) -> bool:
+    """Build the tables. True if new tables were written; False if the build failed but the
+    previous, complete data was kept; exits if there is no usable data."""
     say(f"building the data tables in {DATA_DIR.name}/ "
         "(first run downloads ~10-20 min; later runs use the cache)")
     args = ["build_econ_dataset.py", "--out", str(DATA_DIR)] + (["--refresh"] if refresh else [])
-    if run(py, *args) != 0:
-        die("the data build failed (see above)")
+    rc = run(py, *args)
+    if rc == 2:   # some sources failed, but every country has what the app needs
+        warn("some data sources failed and fell back to cached or reference values "
+             "(see the summary above); rebuild later with `python run.py data`")
+    elif rc != 0:
+        if not missing_tables() and data_version_built() == data_version_wanted():
+            warn("the data build failed (see above); keeping the previous data")
+            return False
+        die("the data build failed (see above). Run it again later (downloads already "
+            "cached are reused)")
+    return True
 
 
 def run_tests(py: Path) -> bool:
@@ -200,24 +227,27 @@ def main() -> None:
     changed = ensure_packages(py, prefix)
 
     if a.command == "data":
-        build_data(py, a.refresh)
-        say("data rebuilt; restart the app to load it")
+        if build_data(py, a.refresh):
+            say("data rebuilt; restart the app to load it")
         return
     if a.command == "test":
         sys.exit(0 if run_tests(py) else 1)
 
     missing = missing_tables()
-    built = False
-    retry = DATA_DIR / ".rebuild"   # tests failed right after a build: a source probably timed out
-    if retry.exists() and not missing and a.command in ("run", "setup"):
-        say("the last data build failed its tests; rebuilding (downloads already cached are reused)")
-        build_data(py, a.refresh)
-        changed = built = True
-    elif missing:
+    stale = not missing and data_version_built() != data_version_wanted()
+    if missing:
         if a.command == "start":
             die(f"no data yet (missing: {', '.join(missing)}). Run `python run.py setup` first")
         build_data(py, a.refresh)
-        changed = built = True
+        changed = True
+    elif stale and a.command == "start":
+        warn("the data tables are from an incomplete build or an older version; "
+             "rebuild with `python run.py data`")
+    elif stale:
+        say("the data tables are from an incomplete build or an older version; rebuilding "
+            "(downloads already cached are reused)")
+        build_data(py, a.refresh)
+        changed = True
     else:
         age = (time.time() - (DATA_DIR / "earnings_profile.csv").stat().st_mtime) / 86400
         if age > 90:
@@ -233,10 +263,7 @@ def main() -> None:
             say("skipping tests (--no-test)")
         elif run_tests(py):
             marker.touch()
-            retry.unlink(missing_ok=True)
         else:
-            if built:
-                retry.touch()               # the next start rebuilds the data before testing
             die("tests failed (see above). Fix them, or start anyway with `python run.py start`")
 
     if a.command == "setup":
