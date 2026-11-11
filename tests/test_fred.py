@@ -118,3 +118,18 @@ def test_live_fred(tmp_path, monkeypatch, use_api):
     df = b.fred(f, "LEU0252881500A")          # CPS median weekly earnings (US earnings)
     assert len(df) > 20 and df["value"].gt(0).all()
     assert all(r["how"] == "network" for r in f.log_rows), f.log_rows
+
+
+def test_unsplit_cp04_keeps_only_utilities():
+    """A country without COICOP 04 detail must not carry rent inside its living budget."""
+    rows = [{"category": "cp04_unsplit", "coicop": "CP04", "monthly_local": 1000.0,
+             "monthly_intl_dollars": 1500.0, "method": "m"},
+            {"category": "clothing", "coicop": "CP03", "monthly_local": 50.0,
+             "monthly_intl_dollars": 75.0, "method": "m"}]
+    split = {"CP043": [0.02, 0.04], "CP044": [0.08, 0.10], "CP045": [0.20, 0.24]}
+    out = b._split_unsplit_cp04(rows, split)
+    cats = {r["category"]: r["monthly_local"] for r in out}
+    assert "cp04_unsplit" not in cats and cats["clothing"] == 50.0
+    assert cats == pytest.approx({"clothing": 50.0, "home_maintenance": 30.0,
+                                  "water_refuse": 90.0, "energy_home": 220.0})
+    assert b._split_unsplit_cp04(rows, {"CP043": [], "CP044": [], "CP045": []}) == rows[1:]

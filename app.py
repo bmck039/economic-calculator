@@ -97,8 +97,8 @@ K = lambda name: f"{name}_{iso}"  # noqa: E731  (per-country keys -> defaults re
 
 with sb.expander("👫 Partners & career", expanded=True):
     c1, c2 = st.columns(2)
-    a1 = c1.number_input("Partner 1 age", 18, 70, 30)
-    a2 = c2.number_input("Partner 2 age", 18, 70, 29)
+    a1 = c1.number_input("Partner 1 age", 18, 70, 23)
+    a2 = c2.number_input("Partner 2 age", 18, 70, 24)
     pct_opts = [p for p in ("p10", "p25", "median", "p75", "p90") if p in cd.earnings] or ["median"]
     pct_lbl = {"p10": "10th pct", "p25": "25th pct", "median": "Median", "p75": "75th pct",
                "p90": "90th pct"}
@@ -121,15 +121,15 @@ with sb.expander("👫 Partners & career", expanded=True):
 
 with sb.expander("💍 Marriage & kids"):
     married = st.checkbox("Get married", True)
-    m_age = st.number_input("Marriage at P1 age", 18, 80, max(int(a1), 31), disabled=not married)
+    m_age = st.number_input("Marriage at P1 age", 18, 80, max(int(a1), 28), disabled=not married)
     wedding = st.number_input(f"Wedding cost ({cd.currency})", 0.0, 1e7,
                               float(round(cd.wedding_cost.value, -2)), 500.0, key=K("wed"),
                               help=src(cd.wedding_cost), disabled=not married)
     kid_opts = ["none"] + list(range(int(a1), 56))
     k1 = st.selectbox("Child 1 born at P1 age", kid_opts,
-                      index=kid_opts.index(max(int(a1), 33)) if max(int(a1), 33) in kid_opts else 0)
+                      index=kid_opts.index(max(int(a1), 30)) if max(int(a1), 30) in kid_opts else 0)
     k2 = st.selectbox("Child 2 born at P1 age", kid_opts,
-                      index=kid_opts.index(max(int(a1), 35)) if max(int(a1), 35) in kid_opts else 0)
+                      index=kid_opts.index(max(int(a1), 33)) if max(int(a1), 33) in kid_opts else 0)
     cc_from, cc_to = st.slider("Paid childcare between child ages", 0, 6, (1, 5))
     cspend = st.number_input(f"Extra household spending per child ({cd.currency}/month)", 0.0,
                              1e6, float(round(cd.child_extra_spending.value)), 25.0, key=K("cs"),
@@ -143,7 +143,7 @@ with sb.expander("🏡 Housing"):
     rent = st.number_input(f"Rent before buying ({cd.currency}/month, excl. utilities)", 0.0,
                            1e6, float(round(cd.rent.value)), 25.0, key=K("rent"),
                            help=src(cd.rent))
-    buy_age = st.number_input("Buy at P1 age", 18, 90, max(int(a1), 35),
+    buy_age = st.number_input("Buy at P1 age", 18, 90, max(int(a1), 30),
                               disabled=mode != "Buy a home")
     price = st.number_input(f"Home price today ({cd.currency})", 0.0, 1e9,
                             float(round(cd.home_price.value, -3)), 5000.0, key=K("hp"),

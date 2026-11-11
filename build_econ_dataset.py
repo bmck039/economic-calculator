@@ -166,7 +166,9 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 # Bump when a pipeline change means tables built by older code must be rebuilt (run.py
 # compares it with <out>/.data-version, which a successful build writes).
 #   2: FRED fix - builds before it could silently lack all US earnings (no USA rows).
-DATA_VERSION = "2"
+#   3: PRT/ROU budgets no longer include rent (unsplit COICOP 04); Canada mortgage rate
+#      = rate paid on new insured loans, not the posted rate.
+DATA_VERSION = "3"
 
 # ==========================================================================
 # Comparability notes
@@ -2019,6 +2021,19 @@ def housing_canada(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                                    "series": "BoC V80691335", "measure": "housing"}))
     except (FetchError, ValueError, KeyError) as e:
         log.warning("BoC mortgage rate skipped: %s", e)
+    try:  # rate actually paid on new insured 5y+ fixed mortgages (posted rates are ~2 pts
+        # higher than what borrowers get); insured = under 20% down, like the default plan
+        js = json.loads(f.get("https://www.bankofcanada.ca/valet/observations/V122667780/json",
+                              label="boc:V122667780"))
+        obs = [(o["d"], o["V122667780"]["v"]) for o in js.get("observations", [])
+               if o.get("V122667780", {}).get("v") not in (None, "")]
+        parts.append(pd.DataFrame({"iso3": "CAN", "period": [d[:7] for d, _ in obs],
+                                   "value": [v for _, v in obs],
+                                   "statistic": "mortgage_rate_new_loans", "unit": "%",
+                                   "series": "BoC V122667780 (funds advanced, insured, "
+                                             "fixed 5y+)", "measure": "housing"}))
+    except (FetchError, ValueError, KeyError) as e:
+        log.warning("BoC new-mortgage rate skipped: %s", e)
     try:  # regular gasoline, self-serve, by city
         d = statcan(f, "18100001", None, {"type of fuel": "regular unleaded gasoline"},
                     since=since)
@@ -2035,7 +2050,8 @@ def housing_canada(f: CachedFetcher, since: int | None) -> pd.DataFrame:
         df = df[df["period"].str[:4].astype(int) >= since]
     return frame(df, frequency="M", source="StatCan / CMHC / Bank of Canada",
                  comparability_note="CMHC rents: purpose-built rentals in centres 10k+; "
-                                    "BoC posted rates exceed typical discounted rates.")
+                                    "mortgage rate = rate paid on new insured 5y+ fixed loans "
+                                    "(BoC), else the posted 5y rate (higher).")
 
 
 BOE_CSV = ("https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp"
@@ -2617,9 +2633,15 @@ def _per_household(df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     return df, 1.0
 
 
+# Non-rent parts of COICOP 04 (housing, water, electricity, gas): maintenance, water and
+# refuse, energy. Rents (CP041 actual, CP042 imputed) are covered by the rent / purchase.
+CP04_NON_RENT = ("CP043", "CP044", "CP045")
+
+
 def _budget_eu(long, ctx):
     hbs = long[long["measure"] == "household_spending_raw"]
     out = []
+    cp04_split: dict[str, list[float]] = {c: [] for c in CP04_NON_RENT}  # share of CP04
     for iso3, g in hbs.groupby("iso3"):
         tot_all = g[g["statistic"] == "total_by_hhtype"]
         if tot_all.empty:
@@ -2649,6 +2671,9 @@ def _budget_eu(long, ctx):
         lv = g[(g["statistic"] == "level_by_coicop") & (g["year"] == year)]
         lv, _ = _per_household(lv) if not lv.empty else (lv, 1.0)
         lvl = {r.category: r.value for r in lv.itertuples()}
+        if lvl.get("CP04") and all(lvl.get(c) for c in CP04_NON_RENT):
+            for c in CP04_NON_RENT:
+                cp04_split[c].append(lvl[c] / lvl["CP04"])
         if not national and lvl.get("CP00"):
             national = {c: lvl[c] / lvl["CP00"] for c in LEVEL2 if c in lvl}
         if not shares:
@@ -2705,7 +2730,31 @@ def _budget_eu(long, ctx):
                                   f"HICP {used_idx or 'none'} x{factor:.3f}"
                                   + ("; per-adult-equivalent x1.5" if ae_factor != 1 else ""),
                         "source": "Eurostat HBS", "estimated": True})
-    return out
+    return _split_unsplit_cp04(out, cp04_split)
+
+
+def _split_unsplit_cp04(out: list[dict], cp04_split: dict[str, list[float]]) -> list[dict]:
+    """A country without HBS detail for COICOP 04 got the whole group as 'cp04_unsplit',
+    and that group is mostly actual + imputed RENT, which the rent / house purchase already
+    pays. Keep only its utilities and maintenance, using the median structure of the
+    countries that publish the detail."""
+    med = {c: float(pd.Series(v).median()) for c, v in cp04_split.items() if v}
+    res = []
+    for r in out:
+        if r["category"] != "cp04_unsplit":
+            res.append(r)
+            continue
+        if len(med) < len(CP04_NON_RENT):
+            continue  # no structure to borrow: drop it rather than double-count rent
+        for c in CP04_NON_RENT:
+            k = dict(r)
+            k.update(category=COICOP_CATS[c], coicop=c,
+                     monthly_local=r["monthly_local"] * med[c],
+                     monthly_intl_dollars=(r["monthly_intl_dollars"] or 0) * med[c] or None,
+                     method=r["method"] + f"; no CP04 detail: x{med[c]:.3f} = median {c} share "
+                     "of CP04 in countries with detail")
+            res.append(k)
+    return res
 
 
 def _budget_us(long, ctx):

@@ -221,6 +221,17 @@ class DataStore:
             r_e, _ = self.fx_latest("EMU", "lcu_per_usd")
             if r_l and r_e:
                 es = es.with_value(es.value * r_l / r_e, unit=currency)
+        if iso3 == "LIE":  # no own data: borrow Switzerland's (same currency, similar costs)
+            ch = self.country("CHE")
+
+            def swiss(s: Sourced, other: Sourced) -> Sourced:
+                if s.value or not other.value:
+                    return s
+                return other.with_value(other.value, estimated=True, quality="C",
+                                        source="ESTIMATE: Swiss value used for Liechtenstein; "
+                                        + other.source)
+            hp, wed = swiss(hp, ch.home_price), swiss(wed, ch.wedding_cost)
+            cc, es = swiss(cc, ch.childcare_per_child), swiss(es, ch.emergency_expense_size)
         nrr = self._nrr(iso3)
         un = self.context(iso3, "unemployment_rate")
         unemp = Sourced(float(un["value"].iloc[-1]), "%", str(un["source"].iloc[-1]),
