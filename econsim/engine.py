@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .model import CountryData, Plan
+from .model import EDUCATION, CountryData, Plan, age_band
 from .tax import (USParams, household_income_tax, local_rates, uk_sdlt_first_time,
                   us_expat_tax, us_fica, us_resident_tax, youth_tax_factor)
 
@@ -62,6 +62,28 @@ MOVING_PCT = 1.0                   # removals + furnishing a bigger home, % of t
 IRL_PRIVATE_HEALTH = (1600.0, 400.0)  # EUR/yr adult, child (VHI/Laya/Irish Life mid plan)
 
 
+PAY_BANDS = ((30, "25-34"), (40, "35-44"), (50, "45-54"), (60, "55-64"))  # band midpoints
+
+
+def edu_pay_factor(cd: CountryData, education: str | None, age: float) -> float:
+    """Full-time pay for `education` relative to all education levels at `age` (OECD EAG
+    relative earnings), interpolated between age-band midpoints; 1 if unknown."""
+    if not education or not cd.edu_pay:
+        return 1.0
+    pts = [(m, cd.edu_pay[(education, b)]) for m, b in PAY_BANDS
+           if (education, b) in cd.edu_pay]
+    if not pts:
+        return 1.0
+    return float(np.interp(age, [a for a, _ in pts], [f for _, f in pts]))
+
+
+def unemployment_rate_for(cd: CountryData, age: int, education: str | None):
+    """Unemployment rate (%) for the age band and degree, with its Sourced (or None)."""
+    s = cd.labour.get(("unemployment", age_band(age), education or "all")) if cd.labour \
+        else None
+    return (s.value, s) if s is not None else (None, None)
+
+
 def _nan0(x) -> float:
     try:
         x = float(x)
@@ -100,6 +122,24 @@ def resolve(plan: Plan, cd: CountryData) -> dict:
         "rent": pick(plan.rent, cd.rent),
         "emergency_annual_cost": pick(plan.emergency_annual_cost, cd.emergency_expense_size),
     }
+    for i, e in enumerate(plan.earners):
+        if e.education:
+            lbl = f"P{i + 1} degree"
+            out[f"{lbl}: pay vs all degrees"] = {
+                "value": edu_pay_factor(cd, e.education, e.age) if plan.education_pay
+                else 1.0, "unit": "x",
+                "source": (cd.edu_pay_src.source if cd.edu_pay_src and plan.education_pay
+                           else "not applied (pay = all-degree profile)"),
+                "year": cd.edu_pay_src.year if cd.edu_pay_src else None,
+                "estimated": bool(cd.edu_pay_src and cd.edu_pay_src.estimated),
+                "quality": "B", "note": f"{EDUCATION.get(e.education, e.education)}, at age "
+                f"{e.age}; {cd.edu_pay_src.note if cd.edu_pay_src else ''}"}
+        v, s = unemployment_rate_for(cd, e.age, e.education)
+        if s is not None:
+            out[f"P{i + 1} unemployment rate (age {age_band(e.age)}, "
+                f"{(e.education or 'all degrees').replace('_', ' ')})"] = {
+                "value": v, "unit": "%", "source": s.source, "year": s.year,
+                "estimated": s.estimated, "quality": s.quality, "note": s.note}
     g = out["real_wage_growth"]["value"]
     out["home_real_appreciation"] = (
         {"value": float(plan.home_real_appreciation), "source": "user input", "unit": "%"}
@@ -228,12 +268,16 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         prof.append(pts)
     earn_year = cd.earnings_src.year
 
+    def pay_f(i: int, age: float) -> float:
+        e = plan.earners[i]
+        return edu_pay_factor(cd, e.education, age) if plan.education_pay else 1.0
+
     def gross_at(i: int, age: int, t: int) -> float:
         e = plan.earners[i]
         if not e.works or age >= plan.retirement_age or age < 18:
             return 0.0
-        base0 = interp_profile(prof[i], e.age)
-        shape = interp_profile(prof[i], age) / base0 if base0 else 1.0
+        base0 = interp_profile(prof[i], e.age) * pay_f(i, e.age)
+        shape = interp_profile(prof[i], age) * pay_f(i, age) / base0 if base0 else 1.0
         rel = shape ** e.career_growth if shape > 0 else 0.0
         return start(base0, earn_year) * rel * ((1 + g_real) * (1 + infl)) ** t
 
@@ -305,7 +349,10 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     tt_user = plan.transfer_tax_pct is not None
     dp_user = plan.down_payment_pct is not None
 
-    def unemp_rate(age: int) -> float:
+    def unemp_rate(age: int, education: str | None = None) -> float:
+        v, _ = unemployment_rate_for(cd, age, education)
+        if v is not None:   # by age band and degree (labour_market.csv)
+            return v
         y, tot = _nan0(cd.unemp_youth), _nan0(cd.unemp_total)
         if age < 25:
             return y or tot
@@ -424,7 +471,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         if plan.unemployment_risk:
             for i in (0, 1):
                 if gross[i] > 0 and not (jl is not None and i == jl.earner and unemp_months):
-                    unemp_cost += unemp_rate(ages[i]) / 100 * net_i[i] * paid_frac[i] * \
+                    unemp_cost += unemp_rate(ages[i], plan.earners[i].education) / 100 * net_i[i] * paid_frac[i] * \
                         (1 - nrr6)
 
         # ---- US citizens abroad

@@ -220,7 +220,9 @@ def main() -> None:
     if not (cfg["PORT"].isdigit() and 1 <= int(cfg["PORT"]) <= 65535):
         die(f"PORT must be 1-65535, got {cfg['PORT']!r}")
     if not os.environ.get("CENSUS_API_KEY"):
-        warn("CENSUS_API_KEY is not set; US rents will use the built-in ACS 2024 reference value")
+        warn("CENSUS_API_KEY is not set; US rents will use the built-in ACS 2025 reference "
+             "value, and US unemployment by age and degree falls back to OECD tables (no "
+             "functional-unemployment or over-qualification figures for the US)")
 
     py = python_env(cfg)
     prefix = prefix_of(py)

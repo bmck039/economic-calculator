@@ -170,7 +170,9 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #      = rate paid on new insured loans, not the posted rate.
 #   4: life_events gains the SILC income and housing costs of the survey households
 #      (the app scales living costs with income after housing; v0.2.0 needs them).
-DATA_VERSION = "4"
+#   5: labour_market + education_pay tables (job market by age and degree, pay by degree),
+#      US CPI 2025 gap fill, current-year unemployment from monthly data.
+DATA_VERSION = "5"
 
 # ==========================================================================
 # Comparability notes
@@ -425,9 +427,9 @@ REFERENCE_VALUES: list[dict] = [
          url="https://www.gov.uk/government/statistics/council-tax-levels-set-by-local-authorities-in-england-2026-to-2027/council-tax-levels-set-by-local-authorities-in-england-2026-to-2027",
          note="Band D incl. adult social care and parish precepts; paid by renters and owners."),
     # ---- Rent / mortgage fallbacks -------------------------------------------------------
-    dict(iso3="USA", topic="rent", item="median_gross_rent", value=1487, unit="USD/month",
-         as_of="2024", quality="A", source="Census ACS 2024 1-year, table B25064",
-         url="https://data.census.gov/table/ACSDT1Y2024.B25064",
+    dict(iso3="USA", topic="rent", item="median_gross_rent", value=1557, unit="USD/month",
+         as_of="2025", quality="A", source="Census ACS 2025 1-year, table B25064",
+         url="https://data.census.gov/table/ACSDT1Y2025.B25064",
          note="Fallback when CENSUS_API_KEY is not set. Contract rent + utilities."),
     dict(iso3="ISL", topic="house", item="mortgage_rate", value=9.25, unit="%",
          as_of="2026-07", quality="C",
@@ -1363,8 +1365,37 @@ def cpi_worldbank(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     d = worldbank(f, "FP.CPI.TOTL", list(COUNTRIES), since)
     d = d.rename(columns={"date": "period"}).assign(statistic="cpi_index", unit="2010=100",
                                                     series="FP.CPI.TOTL")
-    return frame(d, measure="price_level", frequency="A", source="World Bank WDI",
-                 comparability_note="Consumer price index, national definitions.")
+    out = frame(d, measure="price_level", frequency="A", source="World Bank WDI",
+                comparability_note="Consumer price index, national definitions.")
+    try:
+        out = pd.concat([out, cpi_us_gap_fill(f, out)], ignore_index=True)
+    except FetchError as e:
+        log.warning("US CPI gap fill skipped: %s", e)
+    return out
+
+
+def cpi_us_gap_fill(f: CachedFetcher, wb: pd.DataFrame) -> pd.DataFrame:
+    """The World Bank (IMF) has no 2025 CPI for the US: BLS never collected October 2025
+    prices (federal shutdown), so there is no official 12-month average. Fill complete
+    past years from the monthly CPI-U (FRED CPIAUCNS, average of the months published),
+    chained to the World Bank index at the last year both have."""
+    u = wb[(wb["iso3"] == "USA")].set_index("year")["value"]
+    if u.empty:
+        return wb.iloc[0:0]
+    m = fred(f, "CPIAUCNS")
+    m["year"] = m["date"].str[:4].astype(int)
+    a = m.groupby("year")["value"].agg(["mean", "size"])
+    base = int(max(y for y in u.index if y in a.index and a.loc[y, "size"] == 12))
+    k = u.loc[base] / a.loc[base, "mean"]
+    rows = [{"iso3": "USA", "period": str(y), "value": a.loc[y, "mean"] * k,
+             "statistic": "cpi_index", "unit": "2010=100", "series": "CPIAUCNS",
+             "estimated": a.loc[y, "size"] < 12,
+             "method": f"BLS CPI-U, mean of {a.loc[y, 'size']} months, chained to WDI {base}"}
+            for y in a.index if y > base and y < datetime.now().year and y not in u.index]
+    return frame(pd.DataFrame(rows), measure="price_level", frequency="A",
+                 source="World Bank WDI (gap filled from BLS CPI-U)",
+                 comparability_note="Consumer price index, national definitions.") \
+        if rows else wb.iloc[0:0]
 
 
 # ==========================================================================
@@ -1459,19 +1490,366 @@ UNE_DIMS = ["REF_AREA", "MEASURE", "UNIT_MEASURE", "TRANSFORMATION", "ADJUSTMENT
             "AGE", "ACTIVITY", "FREQ"]
 
 
+def annual_from_monthly(m: pd.DataFrame, have: set, keys: list[str]) -> pd.DataFrame:
+    """Calendar-year means of monthly rows (period 'YYYY-MM') for (keys, year) groups
+    that have no published annual value: the current year so far, and years whose annual
+    average was never published (the US skipped October 2025: federal shutdown)."""
+    if m.empty:
+        return m
+    m = m.assign(year=m["period"].str[:4])
+    g = m.groupby(keys + ["year"], as_index=False).agg(
+        value=("value", "mean"), n=("value", "size"), first=("period", "min"),
+        last=("period", "max"))
+    g = g[[tuple(r) not in have for r in g[keys + ["year"]].itertuples(index=False)]]
+    return g.assign(period=g["year"], estimated=g["n"] < 12,
+                    method=[f"mean of {n} monthly values ({a} to {b}), seasonally adjusted"
+                            for n, a, b in zip(g["n"], g["first"], g["last"])]) \
+        .drop(columns=["year", "n", "first", "last"])
+
+
 def unemployment_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     df = oecd(f, "OECD.SDD.TPS,DSD_LFS@DF_IALFS_UNE_M", UNE_DIMS,
               {"REF_AREA": ["USA", "CAN", "GBR"], "MEASURE": ["UNE_LF_M"],
                "UNIT_MEASURE": ["PT_LF_SUB"], "TRANSFORMATION": ["_Z"], "SEX": ["_T"],
-               "AGE": ["Y15T24", "Y_GE25", "Y_GE15"], "ACTIVITY": ["_Z"], "FREQ": ["A"]},
+               "AGE": ["Y15T24", "Y_GE25", "Y_GE15"], "ACTIVITY": ["_Z"], "FREQ": ["A", "M"]},
               since, version="1.0")
     df["_rank"] = df["ADJUSTMENT"].map({"Y": 0, "N": 1}).fillna(2)
-    df = df.sort_values("_rank").drop_duplicates(["REF_AREA", "AGE", "TIME_PERIOD"])
+    df = df.sort_values("_rank").drop_duplicates(["REF_AREA", "AGE", "FREQ", "TIME_PERIOD"])
+    df["OBS_VALUE"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
+    a = df[df["FREQ"] == "A"]
+    out = pd.DataFrame({"iso3": a["REF_AREA"], "period": a["TIME_PERIOD"],
+                        "value": a["OBS_VALUE"], "age_band": a["AGE"]})
+    # monthly -> annual where the annual is missing (US 2025: no October survey) or the
+    # year is not over yet; SA months only, so a part year has no seasonal bias
+    m = df[(df["FREQ"] == "M") & (df["ADJUSTMENT"] == "Y")]
+    m = pd.DataFrame({"iso3": m["REF_AREA"], "period": m["TIME_PERIOD"].astype(str),
+                      "value": m["OBS_VALUE"], "age_band": m["AGE"]}).dropna()
+    have = {(r.iso3, r.age_band, str(r.period)[:4]) for r in out.itertuples()}
+    out = pd.concat([out, annual_from_monthly(m, have, ["iso3", "age_band"])],
+                    ignore_index=True)
+    return frame(out.assign(series="DF_IALFS_UNE_M"), measure="unemployment_rate",
+                 statistic="rate", frequency="A", unit="% of labour force",
+                 source="OECD IALFS", comparability_note=NOTES["une_oecd"])
+
+
+def unemployment_europe_monthly(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Current-year (year-to-date) unemployment for Europe from the monthly series; the
+    annual table (une_rt_a) only has complete years."""
+    yr = datetime.now().year
+    df = eurostat(f, "une_rt_m", required={"unit": ["PC_ACT"], "sex": ["T"], "s_adj": ["SA"]},
+                  optional={"age": ["TOTAL", "Y_LT25"]}, since=yr - 1, geo=EU_GEOS)
+    df = df[df["iso3"] != "GBR"]
+    out = pd.DataFrame({"iso3": df["iso3"], "period": df["time"].astype(str),
+                        "value": pd.to_numeric(df["value"], errors="coerce"),
+                        "age_band": df["age"].map({"TOTAL": "Y15-74", "Y_LT25": "Y15-24"})})
+    out = out.dropna()
+    out = annual_from_monthly(out[out["period"].str[:4] == str(yr)], set(),
+                              ["iso3", "age_band"])
+    return frame(out.assign(series="une_rt_m"), measure="unemployment_rate",
+                 statistic="rate", frequency="A", unit="% of labour force",
+                 source="Eurostat LFS (monthly)", comparability_note=NOTES["une_eu"])
+
+
+# ---- unemployment, slack and underemployment by age and education ---------------------
+# Education keys used everywhere downstream (ISCED 2011 attainment):
+EDU_EUROSTAT = {"TOTAL": "all", "ED0-2": "below_upper_secondary", "ED3_4": "upper_secondary",
+                "ED5-8": "tertiary"}
+EDU_OECD = {"_T": "all", "ISCED11A_0T2": "below_upper_secondary",
+            "ISCED11A_3_4": "upper_secondary", "ISCED11A_5": "short_tertiary",
+            "ISCED11A_6": "bachelor", "ISCED11A_7_8": "master_plus", "ISCED11A_5T8": "tertiary"}
+
+
+def _age(code: str) -> str:
+    """'Y15-24' / 'Y25T34' / 'Y_GE15' -> '15-24' / '25-34' / '15+'."""
+    s = str(code)
+    if m := re.fullmatch(r"Y(\d+)[-T](\d+)", s):
+        return f"{m.group(1)}-{m.group(2)}"
+    if m := re.fullmatch(r"Y_GE(\d+)", s):
+        return f"{m.group(1)}+"
+    return s
+
+
+def unemp_by_education_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    df = eurostat(f, "lfsa_urgaed", required={"unit": ["PC"], "sex": ["T"]},
+                  optional={"age": ["Y15-24", "Y20-24", "Y25-29", "Y30-34", "Y25-64"],
+                            "isced11": list(EDU_EUROSTAT)},
+                  since=max(since or 2010, 2010), geo=EU_GEOS)
+    df = df[df["isced11"].isin(EDU_EUROSTAT)]
+    out = pd.DataFrame({"iso3": df["iso3"], "period": df["time"], "value": df["value"],
+                        "age_band": df["age"].map(_age),
+                        "category": df["isced11"].map(EDU_EUROSTAT), "series": "lfsa_urgaed"})
+    return frame(out, measure="unemployment_by_education", statistic="rate", frequency="A",
+                 unit="% of labour force", source="Eurostat LFS",
+                 comparability_note="ILO unemployment rate by highest level of education "
+                 "completed (ISCED 2011).")
+
+
+SLACK_STATUS = ["UNE", "UEMP_PT", "SEEK_NAVL", "NSEEK_AVL", "SLACK"]
+
+
+def slack_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Eurostat labour-market slack (the EU's U-6): unemployed + underemployed part-timers
+    + people available but not seeking + seeking but not available, % of the extended
+    labour force (labour force + the last two groups)."""
+    parts = []
+    a = eurostat(f, "lfsi_sla_a", required={"sex": ["T"], "unit": ["PC_ELF", "THS_PER"]},
+                 optional={"age": ["Y15-24", "Y15-29", "Y25-54", "Y15-74"],
+                           "wstatus": SLACK_STATUS}, since=max(since or 2010, 2010),
+                 geo=EU_GEOS)
+    parts.append(pd.DataFrame({"iso3": a["iso3"], "period": a["time"], "value": a["value"],
+                               "age_band": a["age"].map(_age), "category": "all",
+                               "statistic": a["wstatus"].str.lower(),
+                               "unit": a["unit"].map({"PC_ELF": "% of extended labour force",
+                                                      "THS_PER": "thousand persons"}),
+                               "series": "lfsi_sla_a"}))
+    e = eurostat(f, "lfsa_sup_edu", required={"sex": ["T"], "unit": ["PC_ELF", "THS_PER"]},
+                 optional={"age": ["Y25-74"], "isced11": list(EDU_EUROSTAT),
+                           "wstatus": SLACK_STATUS}, since=max(since or 2010, 2010),
+                 geo=EU_GEOS)
+    e = e[e["isced11"].isin(EDU_EUROSTAT)]
+    parts.append(pd.DataFrame({"iso3": e["iso3"], "period": e["time"], "value": e["value"],
+                               "age_band": e["age"].map(_age),
+                               "category": e["isced11"].map(EDU_EUROSTAT),
+                               "statistic": e["wstatus"].str.lower(),
+                               "unit": e["unit"].map({"PC_ELF": "% of extended labour force",
+                                                      "THS_PER": "thousand persons"}),
+                               "series": "lfsa_sup_edu"}))
+    return frame(pd.concat(parts, ignore_index=True), measure="labour_slack", frequency="A",
+                 source="Eurostat LFS",
+                 comparability_note="Eurostat labour-market slack: UNE unemployed, UEMP_PT "
+                 "part-timers who want and are available for more hours, NSEEK_AVL available "
+                 "but not seeking, SEEK_NAVL seeking but not available.")
+
+
+def overqualification_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    df = eurostat(f, "lfsa_eoqgan", required={"sex": ["T"], "unit": ["PC"]},
+                  optional={"citizen": ["TOTAL"], "age": ["Y20-34", "Y25-34", "Y20-64"]},
+                  since=max(since or 2010, 2010), geo=EU_GEOS)
+    out = pd.DataFrame({"iso3": df["iso3"], "period": df["time"], "value": df["value"],
+                        "age_band": df["age"].map(_age), "category": "tertiary",
+                        "series": "lfsa_eoqgan"})
+    return frame(out, measure="overqualification", statistic="rate", frequency="A",
+                 unit="% of employed tertiary graduates", source="Eurostat LFS",
+                 comparability_note="Over-qualification: tertiary graduates employed in "
+                 "ISCO 4-9 jobs (clerical, service, sales, trades, operators, elementary), "
+                 "which do not usually require a degree.")
+
+
+EAG_DIMS = ["REF_AREA", "SEX", "AGE", "ATTAINMENT_LEV", "EDUCATION_FIELD", "MEASURE", "INCOME",
+            "BIRTH_PLACE", "MIGRATION_AGE", "EDU_STATUS", "LABOUR_FORCE_STATUS",
+            "DURATION_UNEMP", "UNIT_MEASURE", "STATISTICAL_OPERATION", "WORK_TIME_ARNGMNT",
+            "QUESTIONNAIRE", "FREQ"]
+EAG_FLOWS = {  # flow -> (measure, statistic, unit)
+    "DF_LSO_NEAC_UNEMP": ("unemployment_by_education", "rate", "% of labour force"),
+    "DF_LSO_NEAC_EMP": ("employment_by_education", "rate", "% of population"),
+    "DF_LSO_NEAC_DISTR_EA": ("attainment_share", "share", "% of population"),
+    "DF_LSO_EARN_REL_UPPER": ("relative_earnings", "index_upper_secondary_100",
+                              "upper secondary = 100"),
+}
+
+
+def education_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """OECD Education at a Glance: unemployment, employment, attainment shares and relative
+    full-time earnings by education level and age (all OECD countries + BG/HR/RO)."""
+    parts = []
+    for flow, (measure, stat, unit) in EAG_FLOWS.items():
+        df = oecd(f, f"OECD.EDU.IMEP,DSD_EAG_LSO_EA@{flow}", EAG_DIMS,
+                  {"REF_AREA": [c for c in COUNTRIES if c != "LIE"], "SEX": ["_T"],
+                   "AGE": ["Y25T34", "Y35T44", "Y45T54", "Y55T64", "Y25T64"],
+                   "ATTAINMENT_LEV": list(EDU_OECD)}, max(since or 2010, 2010))
+        df = df[(df.get("STATISTICAL_OPERATION", "OBS") == "OBS") &
+                df["ATTAINMENT_LEV"].isin(EDU_OECD) & (df["SEX"] == "_T")]
+        if "WORK_TIME_ARNGMNT" in df and flow == "DF_LSO_EARN_REL_UPPER":
+            df = df[df["WORK_TIME_ARNGMNT"] == "FT"]
+        parts.append(frame(pd.DataFrame({
+            "iso3": df["REF_AREA"], "period": df["TIME_PERIOD"], "value": df["OBS_VALUE"],
+            "age_band": df["AGE"].map(_age), "category": df["ATTAINMENT_LEV"].map(EDU_OECD),
+            "series": flow}), measure=measure, statistic=stat, unit=unit, frequency="A",
+            source="OECD Education at a Glance",
+            comparability_note="Labour-force survey data by highest attainment (ISCED 2011)."
+            + (" Earnings: full-time full-year earners, upper secondary = 100."
+               if measure == "relative_earnings" else "")))
+    return pd.concat(parts, ignore_index=True)
+
+
+INVPT_DIMS = ["REF_AREA", "MEASURE", "UNIT_MEASURE", "SEX", "AGE", "WORKER_STATUS", "FREQ"]
+
+
+def involuntary_pt_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    df = oecd(f, "OECD.ELS.SAE,DSD_INVPT_EMP@DF_INVPT_I", INVPT_DIMS,
+              {"REF_AREA": ["USA", "CAN", "GBR"], "UNIT_MEASURE": ["PT_LF"], "SEX": ["_T"],
+               "AGE": ["Y15T24", "Y25T54"], "WORKER_STATUS": ["_T"]}, max(since or 2010, 2010))
     out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
-                        "value": df["OBS_VALUE"], "age_band": df["AGE"],
-                        "series": "DF_IALFS_UNE_M"})
-    return frame(out, measure="unemployment_rate", statistic="rate", frequency="A",
-                 unit="% of labour force", source="OECD IALFS", comparability_note=NOTES["une_oecd"])
+                        "value": df["OBS_VALUE"], "age_band": df["AGE"].map(_age),
+                        "category": "all", "series": "DF_INVPT_I"})
+    return frame(out, measure="involuntary_part_time", statistic="rate", frequency="A",
+                 unit="% of labour force", source="OECD Employment Database",
+                 comparability_note="Part-timers (<30 usual hours) who could not find a "
+                 "full-time job (OECD-harmonised definition).")
+
+
+def slack_canada(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """StatCan supplementary unemployment rates (monthly, unadjusted): R4 = official,
+    R6 = + discouraged searchers + waiting group (people who want work and would take it
+    but are not counted as unemployed)."""
+    df = statcan(f, "14100077", match={"supplementary": ["R4 -", "R6 -"],
+                                       "gender": "Total", "age": None},
+                 since=max(since or 2010, 2010))
+    agec = col_like(df, "age")
+    rc = col_like(df, "supplementary")
+    bands = {"15 to 24 years": "15-24", "25 to 44 years": "25-44", "25 to 54 years": "25-54",
+             "15 years and over": "15+"}
+    df = df[df[agec].isin(bands)]
+    m = pd.DataFrame({"iso3": "CAN", "period": df["REF_DATE"].astype(str).str[:7],
+                      "value": df["VALUE"], "age_band": df[agec].map(bands),
+                      "statistic": df[rc].str[:2].str.lower()}).dropna()
+    m = m.assign(year=m["period"].str[:4])
+    g = m.groupby(["iso3", "age_band", "statistic", "year"], as_index=False).agg(
+        value=("value", "mean"), n=("value", "size"), last=("period", "max"))
+    g = g.assign(period=g["year"], estimated=g["n"] < 12, category="all",
+                 method=[f"mean of {n} months (to {b})" for n, b in zip(g["n"], g["last"])])
+    return frame(g.drop(columns=["year", "n", "last"]).assign(series="14-10-0077-01"),
+                 measure="labour_slack", frequency="A", unit="% of labour force",
+                 source="StatCan LFS",
+                 comparability_note="StatCan supplementary unemployment rates R4 / R6.")
+
+
+ONS_LMS = "https://www.ons.gov.uk/employmentandlabourmarket/peopleinwork/" \
+    "employmentandemployeetypes/timeseries/{cdid}/lms/data"
+
+
+def slack_uk(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """UK discouraged workers (ONS LF8B, 16-64) as % of the extended labour force (LF2K
+    economically active 16-64 + discouraged). Eurostat stopped UK slack data in 2019."""
+    def series(cdid):
+        js = json.loads(f.get(ONS_LMS.format(cdid=cdid), label=f"ons:{cdid}",
+                              validate=is_json))
+        out = {}
+        for p in js.get("months") or []:
+            try:
+                out.setdefault(int(p["year"]), []).append(float(p["value"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+    disc, lf = series("lf8b"), series("lf2k")
+    rows = [{"iso3": "GBR", "period": str(y), "value": 100 * (sum(d) / len(d)) /
+             (sum(lf[y]) / len(lf[y]) + sum(d) / len(d)), "estimated": len(d) < 12,
+             "method": f"mean of {len(d)} months"} for y, d in disc.items()
+            if y in lf and y >= max(since or 2010, 2010)]
+    if not rows:
+        raise FetchError("ONS LF8B/LF2K: no observations")
+    return frame(pd.DataFrame(rows).assign(series="ONS LF8B"), measure="labour_slack",
+                 statistic="discouraged", age_band="16-64", category="all", frequency="A",
+                 unit=PC_ELF, source="ONS LFS",
+                 comparability_note="ONS discouraged workers (inactive, want a job, believe "
+                 "no jobs are available): narrower than US 'marginally attached'.")
+
+
+CPS_BASIC = "https://api.census.gov/data/{y}/cps/basic/{m}"
+CPS_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+              "dec"]
+CPS_VARS = ("PRTAGE,PEEDUCA,PEMLR,PRWKSTAT,PRDISC,PEHRWANT,PEHRAVL,PRMJOCC1,PTIO1OCD,"
+            "PWCMPWGT")
+# Sales / office occupations that ISCO-08 puts in major groups 2-3 (professionals,
+# associate professionals): graduate-level jobs for the over-qualification measure.
+CPS_GRAD_OCC = {4710, 4800, 4810, 4820, 4840, 4850, 4920, 4930, 5000, 5250, 5500, 5710,
+                5720, 5730}
+CPS_BANDS = {"15-24": (16, 24), "20-24": (20, 24), "25-29": (25, 29), "30-34": (30, 34),
+             "25-34": (25, 34), "25-54": (25, 54), "25-64": (25, 64), "15-64": (16, 64)}
+
+
+def cps_education(peeduca: pd.Series) -> pd.Series:
+    """CPS PEEDUCA -> education key. 'Some college, no degree' is upper secondary."""
+    return pd.cut(peeduca, [0, 38, 40, 42, 43, 46],
+                  labels=["below_upper_secondary", "upper_secondary", "short_tertiary",
+                          "bachelor", "master_plus"]).astype(str)
+
+
+def cps_rates(d: pd.DataFrame) -> dict:
+    """Weighted labour-market rates for a CPS microdata frame (columns as CPS_VARS)."""
+    w = d["PWCMPWGT"]
+    lf = d["PEMLR"].between(1, 4)
+    un = d["PEMLR"].isin([3, 4])
+    emp = d["PEMLR"].isin([1, 2])
+    # marginally attached (BLS): want a job, available, searched in the past 12 months
+    ma = d["PEMLR"].between(5, 7) & d["PRDISC"].isin([1, 2])
+    # part-timers who want full-time hours and are available (Eurostat UEMP_PT concept)
+    ptw = emp & (d["PEHRWANT"] == 1) & (d["PEHRAVL"] != 2)
+    pte = emp & d["PRWKSTAT"].isin([3, 6])          # BLS 'part time for economic reasons'
+    occ = emp & d["PRMJOCC1"].between(1, 10)
+    # non-graduate job ~ ISCO 4-9: outside management/business/financial/professional,
+    # except the sales and office jobs ISCO classes as associate professional
+    ocd = d["PTIO1OCD"] if "PTIO1OCD" in d else pd.Series(-1, index=d.index)
+    nongrad_job = occ & d["PRMJOCC1"].between(3, 10) & ~ocd.isin(CPS_GRAD_OCC)
+    W = lambda m: float(w[m].sum())  # noqa: E731
+    lfw, elf = W(lf), W(lf) + W(ma)
+    if lfw <= 0:
+        return {}
+    return {"unemployment": 100 * W(un) / lfw,
+            "functional": 100 * (W(un) + W(ptw) + W(ma)) / elf,
+            "u6": 100 * (W(un) + W(pte) + W(ma)) / elf,
+            "hours_underemployment": 100 * W(ptw) / elf,
+            "slack_extra": 100 * (W(ptw) + W(ma)) / elf,
+            "marginally_attached": 100 * W(ma) / elf,
+            "overqualification": 100 * W(nongrad_job) / W(occ) if W(occ) else float("nan"),
+            "n_lf": float(lf.sum())}
+
+
+def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """US rates by age and education straight from the CPS basic monthly microdata (Census
+    API), pooled by calendar year: the current year so far and last year. BLS publishes
+    no age x education U-6, and OECD/BLS annual tables lag (or, for 2025, are missing)."""
+    key = os.environ.get("CENSUS_API_KEY")
+    if not key:
+        raise FetchError("CPS microdata needs CENSUS_API_KEY (free: "
+                         "https://api.census.gov/data/key_signup.html)")
+    now = datetime.now()
+    rows = []
+    for y in (now.year - 1, now.year):
+        months = []
+        for i, mon in enumerate(CPS_MONTHS):
+            if y == now.year and i + 1 >= now.month:
+                break
+            try:
+                js = json.loads(f.get(CPS_BASIC.format(y=y, m=mon),
+                                      {"get": CPS_VARS, "PRTAGE": "16:64", "key": key},
+                                      label=f"census:cps:{y}-{mon}", validate=is_json,
+                                      timeout=120))
+            except FetchError as e:
+                if "HTTP 404" in str(e) or "unexpected response" in str(e):
+                    continue  # not released, or not collected (Oct 2025: shutdown)
+                raise
+            d = pd.DataFrame(js[1:], columns=js[0]).loc[:, lambda x: ~x.columns.duplicated()]
+            d = d.apply(pd.to_numeric, errors="coerce")
+            months.append(d.assign(month=i + 1))
+        if not months:
+            continue
+        d = pd.concat(months, ignore_index=True)
+        d["PWCMPWGT"] = d["PWCMPWGT"] / d["month"].nunique()   # pooled = average month
+        d["edu"] = cps_education(d["PEEDUCA"])
+        tert = d["edu"].isin(["short_tertiary", "bachelor", "master_plus"])
+        got = sorted(d["month"].unique())
+        span = f"{CPS_MONTHS[got[0] - 1].title()}-{CPS_MONTHS[got[-1] - 1].title()} {y}"
+        for band, (lo, hi) in CPS_BANDS.items():
+            b = d[d["PRTAGE"].between(lo, hi)]
+            for edu, sub in [("all", b), ("tertiary", b[tert.loc[b.index]])] + \
+                    [(e, g) for e, g in b.groupby("edu")]:
+                if edu == "nan":
+                    continue
+                for stat, v in cps_rates(sub).items():
+                    rows.append({"iso3": "USA", "period": str(y), "age_band": band,
+                                 "category": edu, "statistic": stat, "value": v,
+                                 "estimated": len(got) < 12,
+                                 "method": f"{len(got)} months pooled ({span})"})
+    if not rows:
+        raise FetchError("CPS microdata: no months fetched")
+    return frame(pd.DataFrame(rows).assign(series="CPS basic monthly"), measure="us_cps_labour",
+                 frequency="A", unit="% (see statistic)", source="Census/BLS CPS microdata",
+                 comparability_note="Computed from CPS public-use microdata with composite "
+                 "weights. functional = (unemployed + part-timers wanting full-time + "
+                 "marginally attached) / (labour force + marginally attached); "
+                 "overqualification = employed outside management, business, financial and "
+                 "professional occupations (approximates ISCO 4-9).")
 
 
 def vacancies_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -1556,9 +1934,36 @@ def saving_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
               since)
     out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
                         "value": df["OBS_VALUE"], "series": "NAAG_V:B8NS1M"})
-    return frame(out, measure="saving_rate_net", statistic="rate", frequency="A",
-                 unit="% of net disposable income", source="OECD NAAG",
-                 comparability_note=NOTES["sav_net"])
+    out = frame(out, measure="saving_rate_net", statistic="rate", frequency="A",
+                unit="% of net disposable income", source="OECD NAAG",
+                comparability_note=NOTES["sav_net"])
+    try:
+        out = pd.concat([out, saving_us_gap_fill(f, out)], ignore_index=True)
+    except FetchError as e:
+        log.warning("US saving-rate gap fill skipped: %s", e)
+    return out
+
+
+def saving_us_gap_fill(f: CachedFetcher, oecd_rows: pd.DataFrame) -> pd.DataFrame:
+    """OECD has no US household saving rate after 2024 (BEA releases were delayed by the
+    2025 shutdown). Fill later years, including the current year so far, from BEA's monthly
+    personal saving rate (FRED PSAVERT), scaled to the OECD level at the last common year."""
+    u = oecd_rows[oecd_rows["iso3"] == "USA"].set_index("year")["value"]
+    if u.empty:
+        return oecd_rows.iloc[0:0]
+    m = fred(f, "PSAVERT")
+    m["year"] = m["date"].str[:4].astype(int)
+    a = m.groupby("year")["value"].agg(["mean", "size"])
+    base = int(max(y for y in u.index if y in a.index and a.loc[y, "size"] == 12))
+    k = u.loc[base] / a.loc[base, "mean"]
+    rows = [{"iso3": "USA", "period": str(y), "value": a.loc[y, "mean"] * k,
+             "series": "PSAVERT", "estimated": True,
+             "method": f"BEA personal saving rate, mean of {a.loc[y, 'size']} months, x{k:.2f} "
+                       f"(OECD/BEA in {base})"} for y in a.index if y > base and y not in u.index]
+    return frame(pd.DataFrame(rows), measure="saving_rate_net", statistic="rate",
+                 frequency="A", unit="% of net disposable income",
+                 source="OECD NAAG (gap filled from BEA via FRED)",
+                 comparability_note=NOTES["sav_net"]) if rows else oecd_rows.iloc[0:0]
 
 
 def saving_eurostat(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -1944,7 +2349,7 @@ def housing_us_acs(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     if not key:
         raise FetchError("Census API now requires a key: get one free at "
                          "https://api.census.gov/data/key_signup.html and set CENSUS_API_KEY. "
-                         "US rent falls back to reference_values.csv (ACS 2024 median).")
+                         "US rent falls back to reference_values.csv (ACS 2025 median).")
     rows = []
     for y in range(max(since or 2005, 2005), datetime.now().year):
         if y == 2020:  # no standard 1-year release for 2020
@@ -2335,7 +2740,7 @@ class Ctx:
             for iso3, gi in g.groupby("iso3", sort=False):
                 self.by_measure_iso[(m, iso3)] = gi
         pl = self.measure("price_level")
-        wb = pl[pl["source"] == "World Bank WDI"]
+        wb = pl[pl["source"].astype(str).str.startswith("World Bank WDI")]
         self._wb = {s: {(r.iso3, int(r.year)): r.value for r in g.itertuples()
                         if pd.notna(r.year)}
                     for s, g in wb.groupby("statistic")}
@@ -3654,6 +4059,349 @@ def derive_context(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     return df[df["iso3"].isin(COUNTRIES)]
 
 
+# ---------- Job market by age and education ----------------------------------------
+LM_BANDS = ["20-24", "25-29", "30-34", "25-64"]
+LM_EDU = ["all", "below_upper_secondary", "upper_secondary", "short_tertiary", "bachelor",
+          "master_plus"]
+TERTIARY_SUB = {"short_tertiary", "bachelor", "master_plus"}
+LM_SERIES = {"lfsa_urgaed", "lfsi_sla_a", "lfsa_sup_edu", "lfsa_eoqgan", "DF_LSO_NEAC_UNEMP",
+             "DF_INVPT_I", "14-10-0077-01", "CPS basic monthly", "DF_IALFS_UNE_M",
+             "DF_LSO_NEAC_EMP", "DF_LSO_NEAC_DISTR_EA", "DF_LSO_EARN_REL_UPPER", "ONS LF8B"}
+PC_ELF = "% of extended labour force"
+# Functional unemployment = unemployed + part-timers who want and can work more hours +
+# people who want a job and could start but are not searching (U-6-like). People who are
+# searching but cannot start (Eurostat SEEK_NAVL: mostly students) are left out, as in U-6.
+SLACK_EXTRA = ["uemp_pt", "nseek_avl"]
+
+
+class _LM:
+    """(iso3, series, statistic, age, education, unit) -> {year: value} lookups."""
+
+    def __init__(self, long: pd.DataFrame):
+        d = long[long["series"].isin(LM_SERIES)].dropna(subset=["year", "value"])
+        self.s: dict[tuple, dict[str, dict[int, float]]] = {}
+        self.meta: dict[tuple, tuple[bool, str]] = {}
+        txt = lambda x, d="all": d if pd.isna(x) or str(x) in ("", "nan") else str(x)  # noqa
+        for r in d.itertuples(index=False):
+            k = (r.iso3, r.series, txt(r.statistic), txt(r.age_band), txt(r.category))
+            self.s.setdefault(k, {}).setdefault(txt(r.unit, ""), {})[int(r.year)] = \
+                float(r.value)
+            self.meta[k + (int(r.year),)] = (bool(r.estimated),
+                                            "" if pd.isna(r.method) else str(r.method))
+
+    def get(self, iso, series, stat, age, edu="all", year=None, back=0, unit=None):
+        for u, v in self.s.get((iso, series, stat, age, edu), {}).items():
+            if unit is not None and u != unit:
+                continue
+            ys = [y for y in v if year is None or year - back <= y <= year]
+            if ys:
+                y = max(ys)
+                return v[y], y
+        return None, None
+
+    def years(self, iso, series, stat, age, edu="all"):
+        ys = set()
+        for v in self.s.get((iso, series, stat, age, edu), {}).values():
+            ys |= set(v)
+        return sorted(ys)
+
+
+def _ratio(a, b):
+    return a / b if a is not None and b not in (None, 0) else None
+
+
+def _sup_edu(lm: _LM, src: str, edu: str, Y: int) -> list[float] | None:
+    """[part-timers wanting more hours, available but not seeking] for ages 25-74 and an
+    education level, % of its extended labour force (Eurostat publishes the components as
+    counts only; extended labour force = slack count / slack %)."""
+    ths = [lm.get(src, "lfsa_sup_edu", s, "25-74", edu, Y, unit="thousand persons")[0]
+           for s in SLACK_EXTRA + ["slack"]]
+    pc = lm.get(src, "lfsa_sup_edu", "slack", "25-74", edu, Y, unit=PC_ELF)[0]
+    if ths[-1] is None or not pc or all(t is None for t in ths[:-1]):
+        return None
+    elf = ths[-1] / pc * 100
+    return [100 * (t or 0.0) / elf for t in ths[:-1]]
+
+
+def _lm_europe(lm: _LM, iso: str, src: str, Y: int, band: str, edu: str) -> dict:
+    """One cell for a Eurostat country (src = the country whose data is used). Returns
+    {'unemployment': (v, est, note), 'extra': (slack beyond unemployment, of which hours,
+    est, note), 'overqualification': (...)}; 20-24 slack is filled in afterwards."""
+    out, notes, est = {}, [], src != iso
+    if src != iso:
+        notes.append(f"proxy: {src} data")
+    e = edu if edu in ("all", "below_upper_secondary", "upper_secondary") else "tertiary"
+    u, _ = lm.get(src, "lfsa_urgaed", "rate", band, e, Y)
+    if u is None:  # small sample: band rate x the education gap at 25-64
+        r = _ratio(lm.get(src, "lfsa_urgaed", "rate", "25-64", e, Y)[0],
+                   lm.get(src, "lfsa_urgaed", "rate", "25-64", "all", Y)[0])
+        ua, _ = lm.get(src, "lfsa_urgaed", "rate", band, "all", Y)
+        if r is None or ua is None:
+            return {}
+        u, est = ua * r, True
+        notes.append(f"{band} rate x {e.replace('_', ' ')} gap at 25-64 (cell not published)")
+    if edu in TERTIARY_SUB:
+        r = _ratio(lm.get(src, "DF_LSO_NEAC_UNEMP", "rate", "25-34", edu, Y, back=4)[0],
+                   lm.get(src, "DF_LSO_NEAC_UNEMP", "rate", "25-34", "tertiary", Y, back=4)[0])
+        if r is not None:
+            u, est = u * r, True
+            notes.append(f"x{r:.2f} OECD EAG ({edu.replace('_', ' ')} vs all tertiary, 25-34)")
+        else:
+            notes.append("all tertiary (no split by degree)")
+    out["unemployment"] = (u, est, "; ".join(notes))
+    if band != "20-24":
+        x, xn = None, ""
+        if band == "25-29":  # 25-29 = (15-29) - (15-24), in persons
+            parts = {}
+            for a in ("15-29", "15-24"):
+                ths = [lm.get(src, "lfsi_sla_a", s, a, "all", Y, unit="thousand persons")[0]
+                       for s in SLACK_EXTRA + ["une"]]
+                pc = lm.get(src, "lfsi_sla_a", "une", a, "all", Y, unit=PC_ELF)[0]
+                if ths[0] is None or ths[-1] is None or not pc:
+                    parts = None
+                    break
+                parts[a] = ([t or 0.0 for t in ths], ths[-1] / pc * 100)
+            if parts and parts["15-29"][1] > parts["15-24"][1]:
+                elf = parts["15-29"][1] - parts["15-24"][1]
+                x = {s: 100 * (parts["15-29"][0][i] - parts["15-24"][0][i]) / elf
+                     for i, s in enumerate(SLACK_EXTRA)}
+                xn = "ages 25-29 (15-29 minus 15-24)"
+        if x is None:
+            x = {s: lm.get(src, "lfsi_sla_a", s, "25-54", "all", Y, unit=PC_ELF)[0]
+                 for s in SLACK_EXTRA}
+            xn = "ages 25-54"
+            if x["uemp_pt"] is None and x["nseek_avl"] is None:
+                x = None
+        if x is not None:
+            x = {k: max(v or 0.0, 0.0) for k, v in x.items()}
+            r_all = r_pt = 1.0
+            if e != "all":
+                xe, x0 = _sup_edu(lm, src, e, Y), _sup_edu(lm, src, "all", Y)
+                if xe and x0:
+                    r_all = _ratio(sum(xe), sum(x0)) or 1.0
+                    r_pt = _ratio(xe[0], x0[0]) or r_all
+                    xn += f", x{r_all:.2f} {e.replace('_', ' ')} gap at 25-74"
+                else:
+                    xn += " (no education split)"
+            out["extra"] = (sum(x.values()) * r_all, x["uemp_pt"] * r_pt, est or e != "all",
+                            f"Eurostat slack ({xn})")
+    if e == "tertiary":
+        oa = {"20-24": "20-34", "25-29": "25-34", "30-34": "25-34", "25-64": "20-64"}[band]
+        o, _ = lm.get(src, "lfsa_eoqgan", "rate", oa, "tertiary", Y)
+        if o is not None:
+            out["overqualification"] = (o, src != iso, f"Eurostat, ages {oa}, all tertiary")
+    return out
+
+
+def _lm_us(lm: _LM, Y: int, band: str, edu: str) -> dict:
+    out = {}
+
+    def g(stat, b=band, e=edu):
+        return lm.get("USA", "CPS basic monthly", stat, b, e, Y)[0]
+    n = g("n_lf") or 0
+    est, method = lm.meta.get(("USA", "CPS basic monthly", "unemployment", band, edu, Y),
+                              (False, ""))
+    thin = n < 150 and edu != "all"
+
+    def thin_fix(stat):  # band rate x education gap at 25-64
+        r = _ratio(g(stat, "25-64", edu), g(stat, "25-64", "all"))
+        b = g(stat, band, "all")
+        return b * r if r is not None and b is not None else None
+    u = thin_fix("unemployment") if thin else g("unemployment")
+    note = method + (f"; {band} rate x education gap at 25-64 (only {int(n)} sample "
+                     "members)" if thin else "")
+    if u is None:
+        return out
+    out["unemployment"] = (u, est or thin, note)
+    if band != "20-24":
+        x = thin_fix("slack_extra") if thin else g("slack_extra")
+        h = thin_fix("hours_underemployment") if thin else g("hours_underemployment")
+        if x is not None and h is not None:
+            out["extra"] = (x, h, est or thin, "CPS: part-timers wanting full-time + "
+                            "marginally attached")
+    if edu in TERTIARY_SUB:
+        o = g("overqualification", "25-34") if thin else g("overqualification")
+        if o is not None:
+            out["overqualification"] = (o, est or thin, method + ("; ages 25-34" if thin
+                                                                  else ""))
+    return out
+
+
+def _lm_ca_uk(lm: _LM, iso: str, Y: int, band: str, edu: str) -> dict:
+    """Canada / UK: OECD EAG by education (25-34, 25-64) and OECD youth unemployment;
+    slack = OECD involuntary part-time + StatCan R6-R4 (Canada) / ONS discouraged (UK)."""
+    out, notes, est = {}, [], False
+    eag = lambda a, e: lm.get(iso, "DF_LSO_NEAC_UNEMP", "rate", a, e, Y, back=2)[0]  # noqa
+    a = "25-64" if band == "25-64" else "25-34"
+    u = eag(a, edu)
+    if edu != "all" and eag("25-34", edu) is None:
+        return {}   # level not published: derive_labour_market uses the nearest level
+    r_edu = (_ratio(eag("25-34", edu), eag("25-34", "all")) or 1.0) if edu != "all" else 1.0
+    if band == "20-24":
+        y, _ = lm.get(iso, "DF_IALFS_UNE_M", "rate", "Y15T24", "all", Y)
+        if y is None:
+            return {}
+        u, est = y * r_edu, True
+        notes.append("OECD 15-24 rate" + (f" x{r_edu:.2f} {edu.replace('_', ' ')} gap at 25-34"
+                                          if edu != "all" else ""))
+    elif band in ("25-29", "30-34"):
+        notes.append("OECD EAG ages 25-34")
+    if u is None:
+        return {}
+    out["unemployment"] = (u, est, "; ".join(notes))
+    if band != "20-24":
+        ipt, _ = lm.get(iso, "DF_INVPT_I", "rate", "25-54", "all", Y, back=2)
+        if iso == "CAN":
+            ca = {"25-29": "25-44", "30-34": "25-44", "25-64": "25-54"}[band]
+            r6, _ = lm.get(iso, "14-10-0077-01", "r6", ca, "all", Y)
+            r4, _ = lm.get(iso, "14-10-0077-01", "r4", ca, "all", Y)
+            disc = r6 - r4 if r6 is not None and r4 is not None else None
+            dn = f"StatCan R6-R4 discouraged + waiting ({ca})"
+        elif iso == "GBR":
+            disc, _ = lm.get("GBR", "ONS LF8B", "discouraged", "16-64", "all", Y, back=2)
+            dn = "ONS discouraged workers 16-64 (narrow UK definition)"
+        else:
+            disc, dn = None, ""
+        if ipt is not None and disc is not None:
+            out["extra"] = ((ipt + disc) * r_edu, ipt * r_edu, True,
+                            f"OECD involuntary part-time 25-54 + {dn}"
+                            + (f", x{r_edu:.2f} education gap" if edu != "all" else ""))
+    return out
+
+
+def derive_labour_market(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """Unemployment, functional unemployment (U-6-like slack), hours underemployment and
+    over-qualification by age band and education, on one definition for every country.
+
+    functional = unemployment + 'extra' slack (part-timers wanting more hours + people who
+    want work and could start but are not searching). For ages 20-24 the extra slack is
+    the 25-29 extra x (20-24 / 25-29 unemployment): 15-24 slack data are dominated by
+    students (who want part-time jobs or can't start), the group this comparison avoids."""
+    lm = _LM(long)
+    rows = []
+    srcs = {"EU": "Eurostat LFS (lfsa_urgaed, lfsi_sla_a, lfsa_sup_edu, lfsa_eoqgan) + "
+                  "OECD EAG", "USA": "CPS microdata (Census API), computed",
+            "CAN": "OECD EAG + OECD involuntary part-time + StatCan 14-10-0077",
+            "GBR": "OECD EAG + OECD involuntary part-time + ONS LF8B"}
+    srcs["USA_OECD"] = "OECD EAG (no CENSUS_API_KEY: no CPS microdata)"
+    units = {"unemployment": "% of labour force", "functional": PC_ELF,
+             "hours_underemployment": PC_ELF,
+             "overqualification": "% of employed graduates in non-graduate jobs"}
+    for iso in COUNTRIES:
+        if iso == "USA" and lm.years("USA", "CPS basic monthly", "unemployment", "25-29"):
+            years = lm.years("USA", "CPS basic monthly", "unemployment", "25-29", "all")
+            cell = lambda Y, b, e: _lm_us(lm, Y, b, e)  # noqa: E731
+            src = srcs["USA"]
+        elif iso in ("CAN", "GBR", "USA"):  # USA without CPS microdata: OECD, no slack
+            years = [y for y in lm.years(iso, "DF_LSO_NEAC_UNEMP", "rate", "25-34", "all")
+                     if y >= 2015]
+            cell = lambda Y, b, e, i=iso: _lm_ca_uk(lm, i, Y, b, e)  # noqa: E731
+            src = srcs["USA_OECD" if iso == "USA" else iso]
+        else:
+            s = "CHE" if iso == "LIE" else iso
+            years = [y for y in lm.years(s, "lfsa_urgaed", "rate", "25-29", "all") if y >= 2015]
+            cell = lambda Y, b, e, i=iso, s=s: _lm_europe(lm, i, s, Y, b, e)  # noqa: E731
+            src = srcs["EU"]
+        for Y in years:
+            cells = {(b, e): cell(Y, b, e) for b in LM_BANDS for e in LM_EDU}
+            u25 = (cells[("25-29", "all")].get("unemployment") or (None,))[0]
+            u20 = (cells[("20-24", "all")].get("unemployment") or (None,))[0]
+            k = _ratio(u20, u25)
+            for (b, e), c in cells.items():  # degree level not published: nearest level
+                if e in TERTIARY_SUB and "unemployment" not in c:
+                    for alt in ("bachelor", "short_tertiary", "master_plus"):
+                        if "unemployment" in cells[(b, alt)]:
+                            cells[(b, e)] = c = {
+                                k2: v[:-2] + (True, v[-1] + f"; {alt.replace('_', ' ')} "
+                                              "rate (this degree level not published)")
+                                for k2, v in cells[(b, alt)].items()}
+                            break
+            for (b, e), c in cells.items():
+                if b == "20-24" and k is not None and "extra" in cells[("25-29", e)]:
+                    x, h, est, note = cells[("25-29", e)]["extra"]
+                    c["extra"] = (x * k, h * k, True, note + f"; scaled x{k:.2f} (20-24 vs "
+                                  "25-29 unemployment): 15-24 slack data are mostly students")
+                out = {}
+                if "unemployment" in c:
+                    out["unemployment"] = c["unemployment"]
+                    if "extra" in c:
+                        u, ue, un = c["unemployment"]
+                        x, h, xe, xn = c["extra"]
+                        out["functional"] = (u + x, ue or xe, "; ".join(
+                            t for t in (un, "+ " + xn) if t))
+                        out["hours_underemployment"] = (h, xe, xn)
+                if "overqualification" in c:
+                    out["overqualification"] = c["overqualification"]
+                for ind, (v, est, note) in out.items():
+                    if v is None or v != v:
+                        continue
+                    rows.append({"iso3": iso, "indicator": ind, "age_band": b, "education": e,
+                                 "year": Y, "value": round(v, 2), "unit": units[ind],
+                                 "source": src, "method": note, "estimated": bool(est),
+                                 "quality": "A" if not est and ind == "unemployment"
+                                 else "B"})
+    return pd.DataFrame(rows)
+
+
+PAY_BANDS = ["25-34", "35-44", "45-54", "55-64"]
+PAY_LEVELS = ["below_upper_secondary", "upper_secondary", "short_tertiary", "bachelor",
+              "master_plus"]
+
+
+def derive_education_pay(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """Full-time earnings by education relative to all education levels, by age band:
+    OECD EAG relative earnings (upper secondary = 100), averaged over the latest 3 years,
+    divided by their employment-weighted mean (attainment share x employment rate)."""
+    lm = _LM(long)
+    rows = []
+    for iso in COUNTRIES:
+        for band in PAY_BANDS:
+            rel, w = {}, {}
+            for e in PAY_LEVELS + ["tertiary"]:
+                ys = lm.years(iso, "DF_LSO_EARN_REL_UPPER", "index_upper_secondary_100", band, e)
+                if not ys:
+                    continue
+                vals = [lm.get(iso, "DF_LSO_EARN_REL_UPPER", "index_upper_secondary_100",
+                               band, e, y)[0] for y in ys[-3:]]
+                rel[e] = (sum(vals) / len(vals), ys[-1])
+                sh = lm.get(iso, "DF_LSO_NEAC_DISTR_EA", "share", band, e)[0]
+                em = lm.get(iso, "DF_LSO_NEAC_EMP", "rate", band, e)[0]
+                if sh is not None and em is not None:
+                    w[e] = sh * em / 100
+            for e in ("short_tertiary", "bachelor", "master_plus"):
+                if e not in rel and "tertiary" in rel:
+                    rel[e] = rel["tertiary"]
+            lv = [e for e in PAY_LEVELS if e in rel and e in w]
+            if len(lv) < 3 or sum(w[e] for e in lv) <= 0:
+                continue
+            mean = sum(rel[e][0] * w[e] for e in lv) / sum(w[e] for e in lv)
+            for e, (v, y) in rel.items():
+                rows.append({"iso3": iso, "education": e, "age_band": band,
+                             "factor": round(v / mean, 3), "year": y,
+                             "source": "OECD Education at a Glance (relative earnings, "
+                                       "full-time full-year)", "estimated": False,
+                             "method": "3-year average / employment-weighted mean of all "
+                                       "levels"})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    eu = df[df["iso3"].isin([c for c in EUROPE if c != "GBR"])]
+    med = eu.groupby(["education", "age_band"], as_index=False)["factor"].median()
+    extra = []
+    for iso in COUNTRIES:
+        if iso in set(df["iso3"]):
+            continue
+        base = df[df["iso3"] == "CHE"] if iso == "LIE" else med
+        note = "proxy: Switzerland" if iso == "LIE" else "ESTIMATE: median of European " \
+            "countries (no OECD data)"
+        for r in base.itertuples(index=False):
+            extra.append({"iso3": iso, "education": r.education, "age_band": r.age_band,
+                          "factor": r.factor, "year": getattr(r, "year", None),
+                          "source": "OECD Education at a Glance", "estimated": True,
+                          "method": note})
+    return pd.concat([df, pd.DataFrame(extra)], ignore_index=True)
+
+
 # ---------- Country snapshot -----------------------------------------------
 def derive_snapshot(long, ctx, budget, life, epp) -> pd.DataFrame:
     rows = []
@@ -3734,7 +4482,16 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
     "mobility": [("Atlanta Fed WGT", wage_growth_us), ("EU-SILC transitions", income_transitions_eu),
                  ("StatCan income mobility", income_mobility_canada)],
     "job_market": [("Eurostat unemployment", unemployment_europe),
-                   ("OECD unemployment", unemployment_oecd), ("Eurostat JVS", vacancies_europe),
+                   ("OECD unemployment", unemployment_oecd),
+                   ("Eurostat monthly unemployment", unemployment_europe_monthly),
+                   ("Eurostat unemployment by education", unemp_by_education_europe),
+                   ("Eurostat labour-market slack", slack_europe),
+                   ("Eurostat over-qualification", overqualification_europe),
+                   ("OECD Education at a Glance", education_oecd),
+                   ("OECD involuntary part-time", involuntary_pt_oecd),
+                   ("StatCan supplementary rates", slack_canada),
+                   ("ONS discouraged workers", slack_uk),
+                   ("CPS microdata (US)", labour_us_cps), ("Eurostat JVS", vacancies_europe),
                    ("JOLTS", vacancies_us), ("StatCan JVWS", vacancies_canada),
                    ("ONS vacancies", vacancies_uk)],
     "saving": [("OECD saving", saving_oecd), ("Eurostat saving", saving_eurostat)],
@@ -3899,7 +4656,9 @@ def main(argv: list[str] | None = None) -> int:
                      ("earnings_profile", lambda: derive_earnings_profile(long, ctx)),
                      ("tax_curve", lambda: derive_tax_curve(long, ctx)),
                      ("fx_ppp", lambda: derive_fx_ppp(ctx)),
-                     ("context_series", lambda: derive_context(long, ctx))]:
+                     ("context_series", lambda: derive_context(long, ctx)),
+                     ("labour_market", lambda: derive_labour_market(long, ctx)),
+                     ("education_pay", lambda: derive_education_pay(long, ctx))]:
         derived[name] = timed(name, fn)
     derived["country_snapshot"] = timed("country_snapshot", lambda: derive_snapshot(
         long, ctx, derived["couple_budget"], derived["life_events"], derived["earnings_ppp"]))

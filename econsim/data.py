@@ -46,6 +46,8 @@ class DataStore:
         self.mob = rd("mobility_summary")
         self.expat = rd("expat_tax")
         self.snap = rd("country_snapshot")
+        self.labour = rd("labour_market")
+        self.edu_pay = rd("education_pay")
         if not self.snap.empty:
             COUNTRY_NAMES.update(dict(zip(self.snap["iso3"], self.snap["country"])))
 
@@ -232,11 +234,44 @@ class DataStore:
         if not snap.empty and "youth_unempl" in snap:
             upd["unemp_youth"] = float(snap["youth_unempl"].iloc[0])
         upd["unemp_total"] = cd.unemployment_rate.value
+        upd.update(self._labour(iso3))
         upd["notes"] = notes
         cd = replace(cd, **upd)
         cd = replace(cd, budget_ref_income=self._budget_ref_income(iso3, cd))
         cd = replace(cd, budget_ref_housing=self._budget_ref_housing(iso3, cd))
         return cd
+
+    def labour_history(self, iso3: str, indicator: str, band: str, edu: str) -> pd.DataFrame:
+        """Yearly values of one labour_market cell (for charts)."""
+        L = self.labour
+        if L.empty:
+            return L
+        return L[(L["iso3"] == iso3) & (L["indicator"] == indicator) & (L["age_band"] == band)
+                 & (L["education"] == edu)].sort_values("year")
+
+    def _labour(self, iso3: str) -> dict:
+        out: dict = {"labour": {}, "edu_pay": {}, "edu_pay_src": None}
+        L = self.labour
+        if not L.empty:
+            last = L[L["iso3"] == iso3].sort_values("year").groupby(
+                ["indicator", "age_band", "education"]).tail(1)
+            for r in last.itertuples(index=False):
+                q = str(r.quality) if not _nan(r.quality) else ""
+                out["labour"][(r.indicator, r.age_band, r.education)] = Sourced(
+                    float(r.value), str(r.unit), str(r.source), int(r.year),
+                    bool(r.estimated), q, "" if _nan(r.method) else str(r.method))
+        E = self.edu_pay
+        if not E.empty:
+            e = E[E["iso3"] == iso3]
+            out["edu_pay"] = {(r.education, r.age_band): float(r.factor)
+                              for r in e.itertuples(index=False)}
+            if not e.empty:
+                r = e.iloc[0]
+                out["edu_pay_src"] = Sourced(
+                    float("nan"), "x all-levels pay", str(r["source"]),
+                    None if _nan(r["year"]) else int(r["year"]), bool(e["estimated"].any()),
+                    "B", "" if _nan(r["method"]) else str(r["method"]))
+        return out
 
     def _budget_ref_housing(self, iso3: str, cd: CountryData) -> Sourced | None:
         """Monthly housing costs (excl. utilities) of the survey households, same price
@@ -293,11 +328,11 @@ class DataStore:
         util = 0.75 * cd.budget["utilities_phone"].value * price_f \
             if "utilities_phone" in cd.budget else 200.0
         rent = Sourced(max(s["rent_recent_gross"] - util, 0.5 * s["rent_recent_gross"]),
-                       "USD/month", "Census ACS 2024 B25113: median gross rent, moved in 2023 "
-                       "or later", "2024", False, "A",
+                       "USD/month", "Census ACS 2025 B25113: median gross rent, moved in 2024 "
+                       "or later", "2025", False, "A",
                        f"gross {s['rent_recent_gross']:,.0f} minus utilities {util:,.0f}")
         nar = 415000 / us["home_value"]
-        hp = Sourced(s["home_value"] * nar, "USD", "Census ACS 2024 B25077 median home value "
+        hp = Sourced(s["home_value"] * nar, "USD", "Census ACS 2025 B25077 median home value "
                      f"x {nar:.3f} (NAR 2025 median sale price / ACS national median)",
                      "2025", False, "B")
         lend = dict(cd.lend)
@@ -315,7 +350,7 @@ class DataStore:
         ccf = (s["rpp"] / 100) ** 1.5
         st_tax = P.us_state_tax().loc[state].to_dict() if state in P.us_state_tax().index \
             else None
-        notes = list(cd.notes) + [f"US state: {s['name']}. Earnings x{earn_f:.3f} (ACS 2024 "
+        notes = list(cd.notes) + [f"US state: {s['name']}. Earnings x{earn_f:.3f} (ACS 2025 "
                                   "median full-time earnings vs US), prices x"
                                   f"{price_f:.3f}, property tax {lend['property_tax_pct']:.2f}%"
                                   " of value (ACS)."]

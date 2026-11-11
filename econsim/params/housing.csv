@@ -33,7 +33,7 @@ rent_new_lease,CHE,1850,CHF,2025,B,BFS/homegate asking rents: 3-room flats natio
 rent_new_lease,LIE,1900,CHF,2025,C,ESTIMATE: Swiss Rhine-valley level,
 rent_new_lease,GBR,1400,GBP,2025,B,ONS Price Index of Private Rents: UK average ~GBP 1370 (2025),
 rent_new_lease,CAN,2100,CAD,2025,B,Rentals.ca/Urbanation national average asking rent ~CAD 2050-2100 (2025),
-rent_new_lease,USA,1450,USD,2024,B,Census ACS 2024 median gross rent (~USD 1650 for recent movers) minus ~USD 200 utilities; state values in us_states.csv,
+rent_new_lease,USA,1490,USD,2025,B,Census ACS 2025 median gross rent of recent movers (B25113: USD 1686) minus ~USD 200 utilities; state values in us_states.csv,
 # home price: typical existing home for a family of four. Per-m2 countries: national median price/m2 of EXISTING dwellings x home_m2,,,,,,,
 home_m2,*,85,m2,,B,assumption: 3-bedroom family flat (~85 m2) where prices are quoted per m2,
 home_price_m2,AUT,3499,EUR,2025,A,Statistik Austria Immobilien-Durchschnittspreise 2025: median flats 4162 / houses 2836 EUR/m2 (mean of both),

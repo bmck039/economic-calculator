@@ -98,8 +98,8 @@ Platform notes for the doco-cd host:
 Manual equivalent: `pip install -r requirements.txt`, `python build_econ_dataset.py`,
 `streamlit run app.py`, `pytest -q`. Useful pipeline flags: `--derive-only` (rebuild the derived tables from the last
 `econ_long.csv`, no network, ~2 min), `--profile` (cProfile top 25), `--refresh`,
-`--reference my_refs.csv`. Set `CENSUS_API_KEY` (free) to get ACS rents; without it the
-US rent comes from `reference_values.csv`.
+`--reference my_refs.csv`. Set `CENSUS_API_KEY` (free) to get ACS rents and the US job-market figures (CPS microdata); without it the
+US rent comes from `reference_values.csv` and US unemployment by degree from OECD tables.
 Set `FRED_API_KEY` (free, [fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html))
 to read the US series (CPS earnings, JOLTS, CE spending, housing) through FRED's API;
 without it they come from FRED's CSV endpoint.
@@ -135,19 +135,22 @@ Things no statistics API publishes comparably. Every value has a source and a qu
 | `housing.csv` | New-lease market rents (~70 m², excl. utilities); existing-home prices (national median per m² × 85 m², or per home) |
 | `lending.csv` | Minimum down payment (and for young buyers), payment-to-income / loan-to-income caps and stress rates, typical term, rate-fixation period and 2005-2025 average rate, transfer tax and closing costs, property tax, home insurance, mortgage-interest relief, borrower insurance |
 | `household.csv` (+ `household_sources.csv`) | Cars (price, insurance, tax, fuel, km, maintenance, tolls, transit pass), health premiums and out-of-pocket costs, parental leave (months, replacement, caps), free pre-school and school ages, compulsory occupational pension contributions, pension replacement rate, employer match, investment tax drag, wealth tax, typical wedding cost, long-run real wage growth |
-| `us_states.csv` | Census ACS 2024 (recent-mover rents, home values, property taxes, full-time earnings), BEA price parities, health-premium and car-insurance factors, state paid family leave |
+| `us_states.csv` | Census ACS 2025 (recent-mover rents, home values, property taxes, full-time earnings), BEA price parities, health-premium and car-insurance factors, state paid family leave |
 | `us_state_tax.csv` | 2026 state income tax brackets, deductions, exemptions (Tax Foundation), local income tax, state payroll taxes |
 
 ## Model in one paragraph
 
 Each partner's gross pay follows the country's (or US state's) cross-sectional age-earnings
-profile at the chosen percentile, plus long-run real wage growth and inflation. Taxes use the
+profile at the chosen percentile, times the full-time pay of their degree relative to all
+degrees at that age (OECD Education at a Glance, if a degree is chosen), plus long-run real
+wage growth and inflation. Taxes use the
 local average tax-rate curve with joint taxation where it exists (DE/LU/PT/PL splitting, FR
 quotient familial), youth exemptions (PL, HU, HR, PT, GR) and compulsory occupational pension
 contributions (CH, NL, DK, IS, LI); US residents get federal + state + local tax and FICA,
 itemising mortgage interest and property tax when that wins. Births trigger the country's
 parental leave (benefit instead of pay for the typical months). An expected unemployment cost
-(rate by age × net pay × (1 − benefit replacement)) is deducted each year. Living costs are the
+(headline rate for the partner's age band and degree × net pay × (1 − benefit replacement))
+is deducted each year. Living costs are the
 survey couple's budget scaled by (income after housing / the survey households' income after
 housing)^0.6, with vehicles and health insurance replaced by explicit car and health modules;
 children add 20% of that budget each (33% from 14, OECD-modified scale) plus childcare until
@@ -157,8 +160,39 @@ fits the country's lending limits; fixed periods end at the long-run average rat
 invested at the nominal return minus the country's tax drag (plus any employer match); pension
 rights are shown as replacement rate × final net pay × 15.
 
+## Job market by age and degree
+
+The Context tab and the unemployment cost use `econ_data/labour_market.csv`: for ages 20-24,
+25-29, 30-34 and 25-64 and six education levels (not specified, below upper secondary, upper
+secondary, associate's/short tertiary, bachelor's, master's+), on one definition everywhere:
+
+* **Unemployment**: ILO headline rate. Europe: Eurostat `lfsa_urgaed` (tertiary split into
+  degree levels with OECD EAG ratios at 25-34); US: computed from CPS basic monthly microdata
+  (Census API, composite weights; the current year is year-to-date); Canada/UK: OECD EAG
+  (25-34, 25-64) and the OECD 15-24 rate × the education gap.
+* **Functional unemployment** (U-6-like): unemployed + part-timers who want and can work more
+  hours + people who want a job and could start but have stopped looking, as % of the labour
+  force plus that last group. Europe: Eurostat slack (`lfsi_sla_a`, `lfsa_sup_edu`) without
+  "seeking but not available" (as in U-6); US: CPS (part-timers wanting full-time, marginally
+  attached); Canada: OECD involuntary part-time + StatCan R6−R4; UK: OECD involuntary part-time
+  + ONS discouraged workers (a narrow definition, so the UK is understated). For ages 20-24
+  the extra slack is the 25-29 value × (20-24 / 25-29 unemployment), because 15-24 slack data
+  are dominated by students.
+* **Hours underemployment**: the part-time piece of the above.
+* **Over-qualification** (degree holders): employed graduates in jobs that do not usually need
+  a degree, ISCO 4-9 (Eurostat `lfsa_eoqgan`). US: occupations outside management, business,
+  financial and professional groups, except the sales/office jobs ISCO puts in groups 2-3. Not
+  available for Canada and the UK on a comparable basis.
+
+Youth (15-24) headline rates differ across countries mostly because of who is in the youth
+labour force: a full-time student looking for a part-time job is unemployed (about 60% of
+unemployed 15-24-year-olds in Sweden, 30% in the US), and the rate divides by a small youth
+labour force where few teenagers work.
+
 ## Known limitations
 
+* Labour-market rates are national: US states use the national rates. Pay by degree is a
+  national average gap (field of study, which matters as much, is not modelled).
 * Several rents, home prices, car costs and wedding costs are estimates (quality C); edit
   `econsim/params/*.csv` if you know better values.
 * Switzerland, Iceland and Liechtenstein have no budget survey here: a neighbouring country's

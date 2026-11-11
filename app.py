@@ -17,7 +17,7 @@ import streamlit as st
 from econsim import params as PRM
 from econsim.data import DataStore
 from econsim.engine import simulate, to_display
-from econsim.model import Earner, JobLoss, Plan
+from econsim.model import EDUCATION, TERTIARY, Earner, JobLoss, Plan, age_band
 
 st.set_page_config(page_title="Life Abroad Planner", layout="wide", page_icon="🌍")
 
@@ -72,6 +72,11 @@ names = dict(countries)
 iso_by_name = {v: k for k, v in countries}
 
 
+EDU_SHORT = {"all": "Not specified (all)", "below_upper_secondary": "No high-school diploma",
+             "upper_secondary": "High school", "short_tertiary": "Associate's",
+             "bachelor": "Bachelor's", "master_plus": "Master's or higher"}
+
+
 def src(s, fmt="{:,.0f}") -> str:
     """Help text for a sourced default."""
     try:
@@ -120,6 +125,21 @@ with sb.expander("👫 Partners & career", expanded=True):
                       if "median" in pct_opts else 0, format_func=pct_lbl.get)
     p2 = c2.selectbox("P2 income", pct_opts, index=pct_opts.index("median")
                       if "median" in pct_opts else 0, format_func=pct_lbl.get)
+    edu_opts = [None] + list(EDUCATION)
+    edu_help = ("Highest completed education. Sets the unemployment risk (and the Context "
+                "tab's job-market figures) for people of that age and degree, and - if 'Pay "
+                "follows the degree' is on - scales pay by the country's full-time earnings "
+                "gap for that degree (OECD Education at a Glance). " + "; ".join(
+                    f"{EDU_SHORT[k]} = {v}" for k, v in EDUCATION.items()))
+    d1 = c1.selectbox("P1 highest degree", edu_opts, format_func=lambda k: EDU_SHORT[k or "all"],
+                      help=edu_help)
+    d2 = c2.selectbox("P2 highest degree", edu_opts, format_func=lambda k: EDU_SHORT[k or "all"],
+                      help=edu_help)
+    edu_pay = st.checkbox("Pay follows the degree", True, disabled=not (d1 or d2),
+                          help="On: earnings = the country's age profile for all workers x "
+                               "the full-time pay of that degree relative to all degrees, by "
+                               "age (e.g. a bachelor's in the US ~1.3x at 25-34). Off: the "
+                               "all-degree profile (use the income percentile instead).")
     g1 = c1.slider("P1 career growth", 0.0, 2.0, 1.0, 0.1,
                    help="1.0 = follow the country's age-earnings profile (cross-section of "
                         "today's workers by age). 0 = flat career; 2 = twice as steep.")
@@ -221,8 +241,9 @@ with sb.expander("🚨 Emergencies & job loss"):
                             help=src(cd.emergency_expense_size) +
                             " Stress test: e.g. one such shock per year.")
     urisk = st.checkbox("Deduct the average cost of unemployment", True,
-                        help="Each year: unemployment rate for the age (youth rate under 25) x "
-                             "net pay x (1 - benefit replacement).")
+                        help="Each year: unemployment rate for the partner's age band and "
+                             "degree (headline ILO rate: people who lose all pay) x net pay x "
+                             "(1 - benefit replacement). See the Context tab.")
     efund = st.slider("Emergency fund target (months of spending)", 0.0, 24.0, 6.0, 0.5)
     jl_on = st.checkbox("Simulate a job loss")
     c1, c2, c3 = st.columns(3)
@@ -279,7 +300,9 @@ def build_plan(iso3: str, override: bool) -> Plan:
     comparison countries use their own data defaults for local prices."""
     jl = JobLoss(jl_who - 1, int(jl_age), int(jl_m)) if jl_on else None
     p = Plan(
-        country=iso3, earners=(Earner(int(a1), p1, g1), Earner(int(a2), p2, g2)),
+        country=iso3, earners=(Earner(int(a1), p1, g1, education=d1),
+                               Earner(int(a2), p2, g2, education=d2)),
+        education_pay=edu_pay,
         horizon_age=int(horizon), retirement_age=int(retire),
         marriage_age=int(m_age) if married else None,
         child_ages=(None if k1 == "none" else int(k1), None if k2 == "none" else int(k2)),
@@ -548,6 +571,96 @@ with tabs[4]:
 with tabs[5]:
     ctx_iso = [iso_by_name[n] for n in [cname] + cmp_names]
 
+    # ---- job market for each partner's age and degree
+    st.subheader("Job market for your age and degree")
+    st.caption("**Functional unemployment** counts everyone who wants a job and can't get "
+               "one: the unemployed + part-timers who want full-time hours + people who want "
+               "work but have stopped looking (Eurostat 'labour-market slack', the "
+               "international version of the US U-6). **Headline** is the official ILO rate. "
+               "Rates are for people of the partner's age band and highest degree (e.g. a "
+               "bachelor's at 23 = 20-24-year-old graduates, i.e. recent graduates). "
+               "Same definitions in every country; the US is computed from Census/BLS CPS "
+               "microdata, Europe from Eurostat's labour-force survey, Canada and the UK "
+               "from OECD + StatCan.")
+
+    def pct(s):
+        return "—" if s is None else f"{s.value:.1f}%" + (" ⚠️" if s.estimated else "")
+
+    def lm_help(s, what):
+        if s is None:
+            return f"No comparable {what} data for this group."
+        return f"{s.source}, {s.year}" + (" — ESTIMATE" if s.estimated else "") + \
+            (f". {s.note}" if s.note else "")
+
+    who = [(int(a1), d1 or "all"), (int(a2), d2 or "all")]
+    for col, (i, (age, edu)) in zip(st.columns(2), enumerate(who)):
+        band = age_band(age)
+        lab = cd.labour or {}
+        f_ = lab.get(("functional", band, edu))
+        u_ = lab.get(("unemployment", band, edu))
+        h_ = lab.get(("hours_underemployment", band, edu))
+        o_ = lab.get(("overqualification", band, edu)) if edu in TERTIARY else None
+        col.markdown(f"**Partner {i + 1}** — ages {band}, {EDU_SHORT[edu].lower()}"
+                     + (f" · {u_.year}" if u_ is not None else ""))
+        m1, m2 = col.columns(2)
+        m1.metric("Functional unemployment", pct(f_), help=lm_help(f_, "slack"))
+        m2.metric("Headline unemployment", pct(u_), help=lm_help(u_, "unemployment"))
+        m3, m4 = col.columns(2)
+        m3.metric("Underemployed (want more hours)", pct(h_), help=lm_help(h_, "hours"))
+        m4.metric("Graduates in non-graduate jobs", pct(o_) if edu in TERTIARY else "n/a",
+                  help=(lm_help(o_, "over-qualification") +
+                        " Over-qualification: employed graduates in jobs that do not "
+                        "usually need a degree (clerical, sales, service, trades, "
+                        "operators). US: outside management/business/financial/"
+                        "professional occupations (approximation of the EU's ISCO 4-9).")
+                  if edu in TERTIARY else "Applies to degree holders.")
+
+    def lm_chart(indicator, title, age, edu, dashed=None, col=None):
+        band, fig, srcs = age_band(age), go.Figure(), set()
+        for i, c in enumerate(ctx_iso):
+            for ind, dash in [(indicator, None)] + ([(dashed, "dot")] if dashed else []):
+                d = ds.labour_history(c, ind, band, edu)
+                if d.empty:
+                    continue
+                srcs.add(str(d["source"].iloc[-1]))
+                nm = names[c] + ("" if dash is None else " (headline)")
+                fig.add_scatter(x=d["year"], y=d["value"], name=nm, mode="lines+markers",
+                                line=dict(color=PALETTE[i], width=2, dash=dash),
+                                marker=dict(size=5), showlegend=dash is None or i == 0,
+                                hovertemplate=nm + ": %{y:.1f}%<extra></extra>")
+        lay = base_layout(fig, title, "%")
+        lay.update_layout(height=340, xaxis_title=None)
+        (col or st).plotly_chart(lay, width="stretch")
+        (col or st).caption(("Sources: " + "; ".join(sorted(srcs))) if srcs else
+                            "No data for this age band and degree.")
+
+    a_, e_ = who[0]
+    c1, c2 = st.columns(2)
+    lm_chart("functional", f"Functional unemployment — ages {age_band(a_)}, "
+             f"{EDU_SHORT[e_].lower()} (dotted: headline)", a_, e_, "unemployment", c1)
+    if e_ in TERTIARY:
+        lm_chart("overqualification", f"Graduates in non-graduate jobs — ages "
+                 f"{age_band(a_)}", a_, e_, None, c2)
+    else:
+        lm_chart("hours_underemployment", f"Underemployed part-timers — ages {age_band(a_)}, "
+                 f"{EDU_SHORT[e_].lower()}", a_, e_, None, c2)
+    with st.expander("Why youth unemployment looks so different across countries"):
+        st.markdown(
+            "All countries use the same ILO definition (no work, looked in the last 4 weeks, "
+            "can start within 2 weeks), but who is in the 15-24 labour force differs:\n\n"
+            "* **Students.** A full-time student looking for a part-time or summer job counts "
+            "as unemployed. In Sweden about 60% of unemployed 15-24-year-olds are full-time "
+            "students (SCB: 102,000 of 170,000 in 2025); in the US about 30% (CPS 2026).\n"
+            "* **Rate vs share of all young people.** The rate divides by the youth labour "
+            "force, not all young people. As a share of ALL 15-24-year-olds, ~14% of Swedes "
+            "and ~5% of Americans are unemployed (2.7x); counting only those who are not "
+            "students, ~5.5% vs ~3.4% (1.6x). Sweden's youth market is weaker, but far less "
+            "than 24% vs 9% suggests.\n"
+            "* **Apprenticeships.** In Germany, Austria and Switzerland apprentices are "
+            "employed, which lowers youth rates.\n\n"
+            "That is why this section uses ages 20-24 / 25-29 / 30-34 and the partner's "
+            "degree: it compares people like you rather than all teenagers.")
+
     def ctx_chart(indicator, title, ytitle, col=None):
         fig = go.Figure()
         srcs = set()
@@ -591,7 +704,7 @@ with tabs[5]:
     ctx_chart("job_vacancy_rate", "Job vacancy rate", "%", c2)
     ctx_chart("saving_rate_net", "Household net saving rate", "% of disposable income", c1)
     ctx_chart("world_uncertainty_index", "World Uncertainty Index", "index", c2)
-    ctx_chart("youth_unemployment_rate", "Youth unemployment (15-24)", "%", c1)
+    ctx_chart("inflation_cpi", "Inflation (CPI)", "% per year", c1)
     ctx_chart("political_stability", "Political stability (WGI)", "-2.5 … 2.5", c2)
 
 # ---------------------------------------------------------------- sources

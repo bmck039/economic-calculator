@@ -20,7 +20,7 @@ def test_app_runs_for_country(country):
     at.sidebar.selectbox[0].set_value(country).run()
     assert not at.exception, at.exception
     assert any(country in t.value for t in at.title)
-    assert len(at.metric) == 5
+    assert len(at.metric) == 5 + 8          # headline row + job market (2 partners x 4)
 
 
 def _w(at, kind, label):
@@ -50,3 +50,19 @@ def test_app_us_state():
     _w(at, "selectbox", "US state").set_value("CA").run()
     assert not at.exception, at.exception
     assert any("California" in t.value for t in at.title)
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+@pytest.mark.parametrize("country", ["Sweden", "United States", "United Kingdom", "Canada"])
+def test_app_degrees(country):
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    at.sidebar.selectbox[0].set_value(country).run()
+    _w(at, "selectbox", "P1 highest degree").set_value("bachelor").run()
+    _w(at, "selectbox", "P2 highest degree").set_value("upper_secondary").run()
+    assert not at.exception, at.exception
+    m = {x.label: x.value for x in at.metric}
+    if (Path(APP).parent / "econ_data" / "labour_market.csv").exists():
+        assert m["Functional unemployment"] not in ("—", None)
+    _w(at, "checkbox", "Pay follows the degree").set_value(False).run()
+    assert not at.exception, at.exception

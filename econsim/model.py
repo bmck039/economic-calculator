@@ -38,6 +38,21 @@ class Sourced:
 
 USER = "user input"
 
+# Highest completed education (ISCED 2011), as used by labour_market / education_pay.
+EDUCATION = {
+    "below_upper_secondary": "No high-school diploma / below upper secondary",
+    "upper_secondary": "High school / upper secondary (incl. some college, vocational)",
+    "short_tertiary": "Associate's / short-cycle tertiary",
+    "bachelor": "Bachelor's degree",
+    "master_plus": "Master's, professional degree or doctorate",
+}
+TERTIARY = {"short_tertiary", "bachelor", "master_plus"}
+
+
+def age_band(age: int) -> str:
+    """labour_market age band for an age."""
+    return "20-24" if age < 25 else "25-29" if age < 30 else "30-34" if age < 35 else "25-64"
+
 
 def user(v: float, unit: str = "") -> Sourced:
     return Sourced(v, unit, USER, None, False, "", "")
@@ -96,6 +111,14 @@ class CountryData:
     state: Optional[str] = None                      # US state code (USA only)
     state_tax: Optional[dict] = None                 # us_state_tax.csv row
     state_info: Optional[dict] = None                # us_states.csv row
+    # job market by age band and education (labour_market.csv), latest year:
+    # (indicator, age_band, education) -> Sourced; indicators: unemployment, functional,
+    # hours_underemployment, overqualification
+    labour: dict = field(default_factory=dict)
+    # full-time pay by education relative to all levels (education_pay.csv):
+    # (education, age_band) -> factor; bands 25-34 / 35-44 / 45-54 / 55-64
+    edu_pay: dict = field(default_factory=dict)
+    edu_pay_src: Optional[Sourced] = None
 
 
 @dataclass
@@ -104,6 +127,7 @@ class Earner:
     percentile: str = "median"       # p25 / median / p75 (p10, p90 where available)
     career_growth: float = 1.0       # 1 = follow the data's age-earnings profile
     works: bool = True
+    education: Optional[str] = None  # highest degree (see EDUCATION); None = all levels
 
 
 @dataclass
@@ -162,3 +186,4 @@ class Plan:
     student_loan: float = 0.0        # balance at the start (local currency, per household)
     budget_elasticity: float = 0.6   # spending rises with income^elasticity (vs survey couple)
     state: Optional[str] = None      # US state (USA only); None -> national averages
+    education_pay: bool = True       # scale pay to each earner's degree (if one is set)
