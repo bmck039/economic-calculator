@@ -135,7 +135,7 @@ Things no statistics API publishes comparably. Every value has a source and a qu
 | `housing.csv` | New-lease market rents (~70 m², excl. utilities); existing-home prices (national median per m² × 85 m², or per home) |
 | `lending.csv` | Minimum down payment (and for young buyers), payment-to-income / loan-to-income caps and stress rates, typical term, rate-fixation period and 2005-2025 average rate, transfer tax and closing costs, property tax, home insurance, mortgage-interest relief, borrower insurance |
 | `household.csv` (+ `household_sources.csv`) | Cars (price, insurance, tax, fuel, km, maintenance, tolls, transit pass), health premiums and out-of-pocket costs, parental leave (months, replacement, caps), free pre-school and school ages, compulsory occupational pension contributions, pension replacement rate, employer match, investment tax drag, wealth tax, typical wedding cost, long-run real wage growth |
-| `us_states.csv` | Census ACS 2025 (recent-mover rents, home values, property taxes, full-time earnings), BEA price parities, health-premium and car-insurance factors, state paid family leave |
+| `us_states.csv` | Health-premium and car-insurance factors and state paid family leave (curated). The ACS columns (recent-mover rents, home values, property taxes, full-time earnings) and BEA price parities are refreshed from the Census and FRED APIs by the pipeline; the CSV values are the fallback |
 | `us_state_tax.csv` | 2026 state income tax brackets, deductions, exemptions (Tax Foundation), local income tax, state payroll taxes |
 
 ## Model in one paragraph
@@ -148,13 +148,19 @@ local average tax-rate curve with joint taxation where it exists (DE/LU/PT/PL sp
 quotient familial), youth exemptions (PL, HU, HR, PT, GR) and compulsory occupational pension
 contributions (CH, NL, DK, IS, LI); US residents get federal + state + local tax and FICA,
 itemising mortgage interest and property tax when that wins. Births trigger the country's
-parental leave (benefit instead of pay for the typical months). An expected unemployment cost
+parental leave (benefit instead of pay for the typical months); afterwards the main parent's
+pay follows the country's typical employment rate × hours of mothers relative to women without
+children, by the youngest child's age (switchable to full time). An expected unemployment cost
 (headline rate for the partner's age band and degree × net pay × (1 − benefit replacement))
 is deducted each year. Living costs are the
-survey couple's budget scaled by (income after housing / the survey households' income after
-housing)^0.6, with vehicles and health insurance replaced by explicit car and health modules;
-children add 20% of that budget each (33% from 14, OECD-modified scale) plus childcare until
-free pre-school. Renting uses new-lease market rents growing with real wages. The purchase
+survey couple's budget (optionally raised toward national-accounts household consumption,
+which surveys under-record), scaled by (income after housing / the survey
+households' income after housing)^0.8 with both growing with average wages, and with vehicles
+and health insurance replaced by explicit car and health modules; children add 20% of that
+per-person spending each (33% from 14, OECD-modified scale) until the country's average age
+of leaving home, plus childcare until free pre-school. Services (childcare, health, cars) rise
+with wages. When money runs short, discretionary spending is cut (up to half) before any
+borrowing; employer pension contributions go to a retirement account, not to the deposit. Renting uses new-lease market rents growing with real wages. The purchase
 waits until the down payment, taxes and fees are saved (keeping 6 months' buffer) and the loan
 fits the country's lending limits; fixed periods end at the long-run average rate. Savings are
 invested at the nominal return minus the country's tax drag (plus any employer match); pension
@@ -188,6 +194,24 @@ Youth (15-24) headline rates differ across countries mostly because of who is in
 labour force: a full-time student looking for a part-time job is unemployed (about 60% of
 unemployed 15-24-year-olds in Sweden, 30% in the US), and the rate divides by a small youth
 labour force where few teenagers work.
+
+## Calibration against real households
+
+`econ_data` also carries the data used to keep the model honest (all from APIs):
+
+| Table | What | Source |
+|---|---|---|
+| `budget_coverage.csv` | National-accounts household consumption ÷ survey spending, per category | Eurostat `nama_10_co3_p3`, `hbs_exp_t121`, `lfst_hhnhtych` (non-EU: EU median) |
+| `family.csv` | Mothers' employment × hours vs women without children; average age of leaving home | Eurostat `lfst_hheredch`, `lfst_hhptechi`, `lfsa_ewhun2`, `yth_demo_030`; CPS microdata; StatCan 14-10-0120 |
+| `pensions.csv` | Net pension replacement rate, average earner | OECD Pensions at a Glance (`DF_PRR`) |
+| `market_index.csv` | Home-price, rent and fuel indices: curated levels are moved to the latest data | Eurostat HPI, HICP; BIS (FRED); NAR, BLS, EIA (FRED) |
+| `mortgage_longrun.csv` | 20-year average new-loan mortgage rate | ECB MIR, SSB, SNB, BoE, Freddie Mac |
+
+The defaults (spending elasticity 0.8, no survey add-back, children at home until the
+national leaving age, the child penalty, the budget constraint) were checked against Eurostat's median saving rate by
+age (`icw_sr_01`), the share of couples who struggle to make ends meet or cannot face an
+unexpected expense (`ilc_mdes09`, `ilc_mdes04`), the age of leaving home, and the Fed's SCF
+net worth of married working couples by age and income.
 
 ## Known limitations
 

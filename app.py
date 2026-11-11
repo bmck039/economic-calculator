@@ -175,6 +175,29 @@ with sb.expander("💍 Marriage & kids"):
     leave_who = st.radio("Main parental leave taken by", ["Partner 1", "Partner 2"], index=1,
                          horizontal=True)
     lv1 = hh.get('leave1_months', 0) + hh.get('leave2_months', 0)
+    fe = cd.family_earn or {}
+    pen_lt6 = fe.get(("2", "lt6", "all"))
+    work_mode = st.radio("Main parent's work while children are young",
+                         ["Country typical", "Full time"], horizontal=True,
+                         help="Country typical: the main parent's pay follows the employment "
+                              "rate x usual hours of mothers aged 25-49 relative to women "
+                              "without children, by the youngest child's age (Eurostat LFS; "
+                              "US: CPS microdata; Canada: StatCan), until the youngest is 18. "
+                              "Childcare falls with it. Full time: both keep working full "
+                              "time (only parental leave).")
+    if pen_lt6 is not None:
+        st.caption(f"{cd.name}: with 2 children and the youngest under 6, mothers' paid "
+                   f"work is {min(pen_lt6, 1.0):.0%} of women without children "
+                   f"({cd.family_src.source if cd.family_src else ''} "
+                   f"{cd.family_src.year if cd.family_src else ''}).")
+    lh = cd.leave_home_age
+    home_d = int(round(lh.value)) if lh is not None and lh.value == lh.value else 18
+    home_to = st.number_input("Children live at home (and cost money) until age", 16, 35,
+                              max(home_d, 18), key=K("home"),
+                              help=(f"Default: average age of leaving the parental home in "
+                                    f"{cd.name}, {lh.value:.1f} ({lh.source}, {lh.year})."
+                                    if lh is not None else "No data: 18.")
+                              + " Child benefits and tax allowances still end at 18.")
     leave_scale = st.slider("Parental leave vs country typical", 0.0, 2.0, 1.0, 0.1,
                             help=f"Typical: {lv1:.1f} months for the main parent, "
                                  f"{hh.get('partner_leave_months', 0):.1f} for the other "
@@ -262,9 +285,20 @@ with sb.expander("🧾 Other costs & options"):
     church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
                          disabled=iso != "DEU")
     priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
-    elast = st.slider("How much spending follows income", 0.0, 1.0, 0.6, 0.05,
+    elast = st.slider("How much spending follows income", 0.0, 1.0, 0.8, 0.05,
                       help="Living costs = survey couple's budget x (your income after housing"
-                           " / theirs)^this. 0 = always the survey average; 1 = proportional.")
+                           " / theirs, both growing with average wages)^this. 0 = always "
+                           "the survey average; 1 = proportional. 0.8 matches how saving "
+                           "rates rise with age in Eurostat's saving-by-age data.")
+    surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, 0.0, 0.05,
+                     help="Household budget surveys record less than national accounts "
+                          "(e.g. food ~80%, restaurants and alcohol about half; Eurostat, by "
+                          "country; outside the EU the EU median). 1 = scale each category "
+                          "up to the national-accounts level; 0 = raw survey (default). Part "
+                          "of the gap is the very rich and the informal economy, whose "
+                          "income the model doesn't include either. 0.5 matches how many "
+                          "couples report struggling to make ends meet a little better, but "
+                          "makes buying implausibly hard in e.g. the UK.")
 
 with sb.expander("📈 Returns, growth & display"):
     c1, c2 = st.columns(2)
@@ -313,6 +347,9 @@ def build_plan(iso3: str, override: bool) -> Plan:
         primary_parent=0 if leave_who == "Partner 1" else 1, leave_scale=leave_scale,
         private_health=priv_h, church_tax=church, student_loan=float(sloan) if override else 0.0,
         budget_elasticity=elast, state=state if iso3 == "USA" else None,
+        survey_correction=surv, child_penalty=work_mode == "Country typical",
+        child_dependent_to=int(home_to) if override and int(home_to) != max(home_d, 18)
+        else None,
         budget_scale=budget_scale, emergency_fund_months=efund, job_loss=jl,
         return_nominal=ret, cash_return=cash_r,
         inflation=None if abs(infl - 2.0) < 1e-9 else infl, us_citizens=us_cit,
@@ -445,6 +482,10 @@ with tabs[1]:
         fig.add_bar(x=disp["age1"], y=disp["home_equity"], name="Home equity",
                     marker_color=PALETTE[1],
                     hovertemplate="Home equity: %{y:,.0f}<extra></extra>")
+    if disp.get("retirement_account") is not None and disp["retirement_account"].abs().sum() > 0:
+        fig.add_bar(x=disp["age1"], y=disp["retirement_account"],
+                    name="Employer pension account", marker_color=PALETTE[2],
+                    hovertemplate="Employer pension: %{y:,.0f}<extra></extra>")
     fig.update_layout(barmode="relative")
     fig.add_scatter(x=disp["age1"], y=disp["net_worth"], name="Net worth", mode="lines",
                     line=dict(color="#0b0b0b", width=2.5),
@@ -453,7 +494,23 @@ with tabs[1]:
     st.plotly_chart(base_layout(fig, "Cumulative savings and net worth", money_note),
                     width="stretch")
     st.caption(f"Emergency fund ({efund:g} months of spending) is kept in cash at {cash_r}%; "
-               f"the rest is invested at {ret}% nominal. Home equity = home value − mortgage.")
+               f"the rest is invested at {ret}% nominal. Home equity = home value − mortgage. "
+               "Employer pension contributions (UK auto-enrolment is in the state pension "
+               "figure instead; US 401(k), Canada) build a retirement account that can't be "
+               "used for a deposit.")
+    if (disp.get("spending_squeeze") is not None) and (disp["spending_squeeze"] > 0).any():
+        sq = disp[disp["spending_squeeze"] > 0]
+        fig2 = go.Figure()
+        fig2.add_bar(x=sq["age1"], y=sq["spending_squeeze"] / 12, marker_color=PALETTE[7],
+                     name="Spending cut", hovertemplate="Cut: %{y:,.0f}/mo<extra></extra>")
+        lay = base_layout(fig2, "Money ran short: discretionary spending cut (per month)",
+                          money_note)
+        lay.update_layout(height=280, showlegend=False)
+        st.plotly_chart(lay, width="stretch")
+        st.caption("When income doesn't cover the survey-typical budget and savings are gone, "
+                   "the household cuts recreation, eating out, clothes and furnishings (and "
+                   "some of the children's spending), up to half of them, before borrowing - "
+                   "what people mean by 'making ends meet with difficulty'.")
 
 # ---------------------------------------------------------------- income
 with tabs[2]:

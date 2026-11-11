@@ -145,7 +145,8 @@ def test_children_add_costs_and_benefits():
 def test_wedding_is_one_off():
     r = simulate(plan(marriage_age=30), country())
     d = r.years
-    assert d["oneoff:wedding"].iloc[2] == pytest.approx(15000 * 1.02 ** 2)
+    # prices x living standards (real wage growth 1%): weddings get richer too
+    assert d["oneoff:wedding"].iloc[2] == pytest.approx(15000 * 1.02 ** 2 * 1.01 ** 2)
     assert d["oneoff:wedding"].drop(index=2).sum() == 0
     assert any(e["event"] == "Marriage" for e in r.events)
 

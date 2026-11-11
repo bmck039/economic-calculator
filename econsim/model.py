@@ -119,6 +119,14 @@ class CountryData:
     # (education, age_band) -> factor; bands 25-34 / 35-44 / 45-54 / 55-64
     edu_pay: dict = field(default_factory=dict)
     edu_pay_src: Optional[Sourced] = None
+    # child penalty for the primary parent (family.csv): (n_children "1"/"2"/"3",
+    # youngest "lt6"/"6-11"/"ge12", education) -> factor vs women without children
+    family_earn: dict = field(default_factory=dict)   # employment x hours
+    family_emp: dict = field(default_factory=dict)    # employment only (childcare need)
+    family_src: Optional[Sourced] = None
+    leave_home_age: Optional[Sourced] = None          # children stop being dependants
+    # survey under-recording: budget category -> national accounts / HBS ratio (>= 1)
+    budget_coverage: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -150,7 +158,8 @@ class Plan:
     childcare_from: int = 1          # child age childcare starts
     childcare_to: Optional[int] = None  # last child age in full-time paid care; None ->
     #                                  country (until free pre-school, then after-school care)
-    child_dependent_to: int = 18     # last age with extra household spending
+    child_dependent_to: Optional[int] = None  # last age living at home (extra spending);
+    #                                  None -> the country's average age of leaving home
     buy_house_age: Optional[int] = 35             # None -> rent forever
     home_price: Optional[float] = None
     down_payment_pct: Optional[float] = None
@@ -184,6 +193,14 @@ class Plan:
     private_health: bool = False     # optional private cover (e.g. Ireland)
     church_tax: bool = False         # Germany: 8-9% of income tax for church members
     student_loan: float = 0.0        # balance at the start (local currency, per household)
-    budget_elasticity: float = 0.6   # spending rises with income^elasticity (vs survey couple)
+    budget_elasticity: float = 0.8   # spending rises with income^elasticity relative to the
+    #                                  survey couple (calibrated on Eurostat saving by age)
+    survey_correction: float = 0.0   # share (exponent) of the national-accounts gap in
+    #                                  survey spending that is added back (0 = raw survey;
+    #                                  0.5 fits hardship surveys best but makes buying
+    #                                  implausibly hard where the gap is only estimated)
+    child_penalty: bool = True       # primary parent works the country's typical hours
+    #                                  while children are young (employment x hours of
+    #                                  mothers vs women without children)
     state: Optional[str] = None      # US state (USA only); None -> national averages
     education_pay: bool = True       # scale pay to each earner's degree (if one is set)

@@ -60,6 +60,16 @@ YOUNG_DRIVER = ((25, 1.7), (30, 1.25))
 STUDENT_LOAN_RATE = 6.4            # % (US federal undergraduate 2025-26)
 MOVING_PCT = 1.0                   # removals + furnishing a bigger home, % of the price
 IRL_PRIVATE_HEALTH = (1600.0, 400.0)  # EUR/yr adult, child (VHI/Laya/Irish Life mid plan)
+# Budget constraint: a household that would run out of money cuts discretionary spending
+# (up to MAX_SQUEEZE of it) before borrowing - liquidity constraints (Deaton 1991, Zeldes
+# 1989). Children's costs count 40% discretionary.
+DISCRETIONARY = {"budget:recreation", "budget:restaurants_hotels", "budget:clothing",
+                 "budget:furnishings_household", "budget:alcohol_tobacco", "budget:personal_misc"}
+MAX_SQUEEZE = 0.5
+PER_PERSON_CATS = {"groceries", "clothing", "recreation", "restaurants_hotels", "personal_misc",
+                   "transport_services", "transport_all", "cp07_unsplit", "education",
+                   "health_out_of_pocket", "cp01_unsplit"}
+CHILD_DISCRETIONARY = 0.4
 
 
 PAY_BANDS = ((30, "25-34"), (40, "35-44"), (50, "45-54"), (60, "55-64"))  # band midpoints
@@ -303,7 +313,8 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         if have_oop and k == "health_out_of_pocket":
             removed0[k] = val
             continue
-        budget0[k] = val * plan.budget_scale
+        cov = (cd.budget_coverage or {}).get(k, 1.0)
+        budget0[k] = val * plan.budget_scale * max(cov, 1.0) ** plan.survey_correction
     ref = cd.budget_ref_income
     ref0 = None
     bp = next(iter(cd.budget.values())).year if cd.budget else dy
@@ -360,8 +371,36 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             return (y + tot) / 2 if y else tot
         return tot
 
+    # children live at home (and cost money) until the country's average leaving age
+    if plan.child_dependent_to is not None:
+        dep_to = plan.child_dependent_to
+    elif cd.leave_home_age is not None and cd.leave_home_age.value == cd.leave_home_age.value:
+        dep_to = max(int(round(cd.leave_home_age.value)), 18)
+    else:
+        dep_to = 18
+    pp = plan.primary_parent
+
+    def family_factor(table: dict, kid_ages_now: list[int]) -> float:
+        """Primary parent's typical work vs no children, by number of children and the
+        youngest's age (1 once the youngest is 18)."""
+        if not plan.child_penalty or not table or not kid_ages_now:
+            return 1.0
+        y = min(kid_ages_now)
+        if y >= 18:
+            return 1.0
+        band = "lt6" if y < 6 else "6-11" if y < 12 else "ge12"
+        n = str(min(len(kid_ages_now), 3))
+        edu = plan.earners[pp].education
+        e = {"short_tertiary": "tertiary", "bachelor": "tertiary",
+             "master_plus": "tertiary"}.get(edu or "all", edu or "all")
+        for key in ((n, band, e), (n, band, "all"), ("2", band, "all"), ("1", band, "all"),
+                    (n, "6-11" if band == "ge12" else band, "all")):
+            if key in table:
+                return min(table[key], 1.0)
+        return 1.0
+
     cash = plan.starting_savings
-    invest = 0.0
+    invest = retire = 0.0
     owned = False
     home_value = mort_bal = mort_pay = 0.0
     mort_rate = m_rate_now
@@ -386,10 +425,13 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         married = married_from_start or (marry_t is not None and t >= marry_t)
         kid_ages = [t - b for b in birth_t if b is not None and t >= b]
         n_kids = len(kid_ages)
-        n_dep = sum(1 for k in kid_ages if k <= plan.child_dependent_to)
+        n_dep = sum(1 for k in kid_ages if k <= 18)           # benefits and taxes
+        n_home = sum(1 for k in kid_ages if k <= dep_to)      # living at home (costs)
         n_ctc = sum(1 for k in kid_ages if k < 17)
 
         normal = [gross_at(0, a1, t), gross_at(1, a2, t)]
+        fam_k = family_factor(cd.family_earn, kid_ages)
+        normal[pp] *= fam_k
 
         # ---- normal (no leave / job loss) taxes and net, per earner and household
         def taxes(gross: list[float], interest: float = 0.0, prop_tax: float = 0.0):
@@ -432,7 +474,8 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 if spec is None:
                     continue
                 rr, cap, floor = spec
-                b = rr * net_i[i] / 12
+                base_i = net_i[i] / fam_k if i == pp and fam_k > 0 else net_i[i]
+                b = rr * base_i / 12
                 if cap > 0:
                     b = min(b, cap * W)
                 b = max(b, floor * W)
@@ -491,27 +534,35 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             - unemp_cost - us_tax
 
         # ---- expenses (nominal)
-        scale = 1.0
+        G = (1 + g_real) ** t      # living standards rise with economy-wide real wages
+        scale = G
         if ref0 and plan.budget_elasticity:
             if owned:
                 housing_now = prev_housing
             else:
-                housing_now = rent0 * H * (cd.rent_factor_per_child[min(n_dep, 2) - 1]
-                                           if n_dep else 1.0)
+                housing_now = rent0 * H * (cd.rent_factor_per_child[min(n_home, 2) - 1]
+                                           if n_home else 1.0)
             y_perm = (normal_net - child_ben - (housing_now if cd.budget_ref_housing
                                                 is not None else 0.0)) / P
-            scale = min(max((y_perm / ref0) ** plan.budget_elasticity, 0.5), 2.0) \
-                if y_perm > 0 else 0.5
+            # the survey couple's income grows with economy-wide real wages too: spending
+            # norms rise with average incomes (saving rates do not trend up as countries
+            # grow), so only income RELATIVE to peers moves the budget
+            scale = G * (min(max((y_perm / (ref0 * G)) ** plan.budget_elasticity, 0.5), 2.0)
+                         if y_perm > 0 else 0.5)
         exp = {f"budget:{k}": v * P * scale for k, v in budget0.items()}
         # children: OECD-modified equivalence scale (couple 1.5; child <14 +0.3, 14+ +0.5)
         # applied to the couple's non-housing living budget; housing via the rent factor,
         # childcare, health and cars separately
         if hh:
+            # OECD-modified scale on PER-PERSON spending only (food, clothes, recreation,
+            # ...): energy, internet, furnishings, insurance or council tax barely change
+            # with children, and children do not drink or smoke
             w = sum(0.3 / 1.5 if k < 14 else 0.5 / 1.5 for k in kid_ages
-                    if k <= plan.child_dependent_to)
-            exp["children"] = sum(budget0.values()) * P * scale * w
+                    if k <= dep_to)
+            exp["children"] = sum(v for k, v in budget0.items() if k in PER_PERSON_CATS) \
+                * P * scale * w
         else:
-            exp["children"] = child_spend0 * P * n_dep * scale
+            exp["children"] = child_spend0 * P * n_home * scale
         free_from = _nan0(hh.get("free_childcare_from")) if hh else None
         cc = 0.0
         for k in kid_ages:
@@ -523,7 +574,9 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                     cc += childcare0
                 elif plan.childcare_from <= k <= 10:
                     cc += 0.2 * childcare0          # after-school / part-day care
-        exp["childcare"] = cc * P
+        # fewer working parents -> less paid care (expected value)
+        cc *= family_factor(cd.family_emp, kid_ages)
+        exp["childcare"] = cc * P * G           # labour-intensive: rises with wages
         # health insurance and out-of-pocket costs
         if have_health or have_oop:
             hc = 0.0
@@ -535,12 +588,12 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 if have_oop:
                     hc += _nan0(hh.get("health_oop_adult"))
             for k in kid_ages:
-                if k <= plan.child_dependent_to:
+                if k <= dep_to:
                     hc += _nan0(hh.get("health_premium_child")) * 12 * have_health + \
                         _nan0(hh.get("health_oop_child")) * have_oop
             if plan.private_health and cd.iso3 == "IRL":
                 hc += 2 * IRL_PRIVATE_HEALTH[0] + n_dep * IRL_PRIVATE_HEALTH[1]
-            exp["health"] = start(hc, 2025) * P
+            exp["health"] = start(hc, 2025) * P * G
         # cars and public transport
         if have_cars:
             car = 0.0
@@ -548,9 +601,9 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 age = ages[min(k, 1)]
                 f = next((m for lim, m in YOUNG_DRIVER if age < lim), 1.0)
                 car += car_fixed0 + car_ins0 * f
-            exp["cars"] = car * P
-            exp["public_transport"] = max(2 - n_cars, 0) * transit0 * P
-        exp["emergencies"] = emerg0 * P
+            exp["cars"] = car * P * G
+            exp["public_transport"] = max(2 - n_cars, 0) * transit0 * P * G
+        exp["emergencies"] = emerg0 * P * G
         # student loan
         if sl_bal > 0:
             if cd.iso3 == "GBR":
@@ -566,19 +619,19 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             exp["student_loan"] = pay
         one_off = {}
         if marry_t is not None and t == marry_t and not married_from_start:
-            one_off["wedding"] = wedding0 * P
+            one_off["wedding"] = wedding0 * P * G
             events.append({"t": t, "age": a1, "event": "Marriage"})
         for k, b in enumerate(birth_t):
             if b is not None and t == b:
                 events.append({"t": t, "age": a1, "event": f"Child {k + 1}"})
                 bc = _nan0(hh.get("birth_cost"))
                 if bc:
-                    one_off[f"birth_{k + 1}"] = start(bc, 2025) * P
+                    one_off[f"birth_{k + 1}"] = start(bc, 2025) * P * G
 
         # ---- housing
         rent_f = 1.0
-        if n_dep:
-            rent_f = cd.rent_factor_per_child[min(n_dep, 2) - 1]
+        if n_home:
+            rent_f = cd.rent_factor_per_child[min(n_home, 2) - 1]
         if not owned and buy_t_plan is not None and t >= buy_t_plan:
             price = price0 * H
             young = a1 <= _nan0(L.get("young_max_age"))
@@ -727,18 +780,36 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             if base > thr:
                 exp["wealth_tax"] = wt * (base - thr)
         recurring = sum(exp.values())
-        prev_recurring = recurring
         prev_housing = (interest + exp.get("owner_costs", 0.0) + exp.get("mortgage_insurance", 0.0)
                         + exp.get("mortgage_interest_relief", 0.0)) * (1 + infl)
         total_out = recurring + sum(one_off.values())
         saving = net - total_out
+        # ---- budget constraint: cut discretionary spending rather than run up debt
+        squeeze = 0.0
+        avail = cash * (1 + (r_cash if cash >= 0 else r_debt)) + invest * (1 + r_inv) + saving
+        if avail < 0:
+            keys = [k for k in exp if k in DISCRETIONARY]
+            pool = sum(exp[k] for k in keys) + CHILD_DISCRETIONARY * exp.get("children", 0.0)
+            cut = min(-avail, MAX_SQUEEZE * pool)
+            if cut > 0:
+                f = cut / pool
+                for k in keys:
+                    exp[k] *= 1 - f
+                if "children" in exp:
+                    exp["children"] *= 1 - CHILD_DISCRETIONARY * f
+                squeeze = cut
+                recurring = sum(exp.values())
+                total_out = recurring + sum(one_off.values())
+                saving = net - total_out
+        prev_recurring = recurring
 
         # ---- balances: emergency fund (cash) first, then investments
         target = plan.emergency_fund_months * recurring / 12
         cash *= 1 + (r_cash if cash >= 0 else r_debt)
         invest *= 1 + r_inv
+        # employer pension contributions: a retirement account (net worth, not liquid)
         match = _nan0(hh.get("employer_match_pct")) / 100 * sum(gross)
-        invest += match
+        retire = retire * (1 + r_inv) + match
         cash += saving
         if cash > target:
             invest += cash - target
@@ -756,7 +827,8 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             "leave_benefits": leave_ben, "leave_months": sum(leave_m),
             "unemployment_months": unemp_months, "job_loss_benefits": jl_ben,
             "unemployment_risk_cost": unemp_cost, "employer_pension": match,
-            "budget_scale": scale,
+            "budget_scale": scale, "child_penalty_factor": fam_k, "spending_squeeze": squeeze,
+            "retirement_account": retire,
             "net1": gross[0] - it[0] - ssc[0] - pen[0], "net2": gross[1] - it[1] - ssc[1] - pen[1],
             "net_income": net, **exp, **{f"oneoff:{k}": v for k, v in one_off.items()},
             "expenses_recurring": recurring, "expenses_total": total_out, "saving": saving,
@@ -766,7 +838,14 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         })
     df = pd.DataFrame(rows).fillna(0.0)
     df["home_equity"] = df["home_value"] - df["mortgage_balance"]
-    df["net_worth"] = df["liquid"] + df["home_equity"]
+    df["net_worth"] = df["liquid"] + df["home_equity"] + df["retirement_account"]
+    sq = df[df["spending_squeeze"] > 0]
+    if not sq.empty:
+        warnings.append(f"Money ran short in {len(sq)} year(s) (ages {int(sq['age1'].min())}-"
+                        f"{int(sq['age1'].max())}): discretionary spending (recreation, eating "
+                        "out, clothes, furnishings) was cut by up to "
+                        f"{(sq['spending_squeeze'] / sq['expenses_recurring']).max():.0%} of "
+                        "the budget instead of borrowing.")
     eff = df["income_tax_local"] + df["ssc_local"]
     df["local_tax_rate"] = np.where(df["gross"] > 0, eff / df["gross"].replace(0, np.nan), 0)
     df["saving_rate"] = np.where(df["net_income"] > 0,
@@ -792,7 +871,7 @@ def to_display(res: Result, cd: CountryData, real: bool = True,
     df = res.years.copy()
     skip = {"t", "year", "age1", "age2", "married", "n_children", "owned", "price_factor",
             "us_method", "unemployment_months", "local_tax_rate", "saving_rate",
-            "budget_scale", "leave_months", "mortgage_rate"}
+            "budget_scale", "leave_months", "mortgage_rate", "child_penalty_factor"}
     money = [c for c in df.columns if c not in skip and pd.api.types.is_numeric_dtype(df[c])]
     div = df["price_factor"] if real else 1.0
     conv = {"local": 1.0, "USD": cd.lcu_per_usd.value, "intl$": cd.lcu_per_intl.value}[currency]
