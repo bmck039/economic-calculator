@@ -167,3 +167,158 @@ def us_expat_tax(earned: list[float], foreign_income_tax: list[float], married: 
 def us_fica(earned_usd: float, p: USParams) -> float:
     """Employee FICA (6.2% up to the wage base + 1.45% Medicare)."""
     return min(earned_usd, p.ss_wage_base) * 0.062 + earned_usd * 0.0145
+
+
+# ---------------------------------------------------------------- local refinements
+# Income-splitting countries: a married couple pays twice the tax on half the joint
+# income (Germany Ehegattensplitting, Luxembourg class 2, Portugal/Poland joint
+# filing). Applied to the income-tax part of the OECD single-person curve.
+SPLITTING = {"DEU", "LUX", "PRT", "POL"}
+FRA_HALF_PART_CAP = 1807.0   # quotient familial: max advantage per child half-part (2026)
+
+
+def income_tax_only(gross: float, aw: float, points: list[TaxPoint],
+                    marginal_top: float | None) -> float:
+    return local_rates(gross, aw, points, marginal_top)[0]
+
+
+def household_income_tax(iso3: str, gross: list[float], married: bool, n_children: int,
+                         aw: float, points: list[TaxPoint],
+                         marginal_top: float | None) -> list[float]:
+    """Income tax per earner, after joint-taxation rules (split back pro rata)."""
+    indiv = [income_tax_only(g, aw, points, marginal_top) for g in gross]
+    tot = sum(gross)
+    if not married or tot <= 0:
+        return indiv
+    if iso3 in SPLITTING:
+        joint = 2 * income_tax_only(tot / 2, aw, points, marginal_top)
+    elif iso3 == "FRA":
+        parts = 2 + 0.5 * min(n_children, 2) + 1.0 * max(n_children - 2, 0)
+        couple = 2 * income_tax_only(tot / 2, aw, points, marginal_top)
+        joint = parts * income_tax_only(tot / parts, aw, points, marginal_top)
+        joint = max(joint, couple - FRA_HALF_PART_CAP * (parts - 2) * 2)
+    else:
+        return indiv
+    joint = min(joint, sum(indiv))
+    return [joint * g / tot for g in gross]
+
+
+def uk_sdlt_first_time(price: float) -> float:
+    """England stamp duty land tax for a first-time buyer (from April 2025)."""
+    if price <= 500_000:
+        return 0.05 * max(price - 300_000, 0)
+    bands = [(125_000, 0.0), (250_000, 0.02), (925_000, 0.05), (1_500_000, 0.10),
+             (float("inf"), 0.12)]
+    tax, lo = 0.0, 0.0
+    for hi, r in bands:
+        if price > lo:
+            tax += (min(price, hi) - lo) * r
+        lo = hi
+    return tax
+
+
+# ---------------------------------------------------------------- US residents
+SALT_CAP = 40_000.0          # 2025-2029 (OBBBA); phased down above USD 500k MAGI
+
+
+@dataclass
+class USResidentTax:
+    federal: float
+    state: float
+    local: float
+    fica: float
+    state_payroll: float
+
+    @property
+    def income_tax(self) -> float:
+        return self.federal + self.state + self.local
+
+    @property
+    def ssc(self) -> float:
+        return self.fica + self.state_payroll
+
+
+def _num(x) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def state_income_tax(wages: float, married: bool, n_dep: int, st: dict | None) -> float:
+    if not st or not str(st.get("brackets_single", "")).strip():
+        return 0.0
+    from .params import parse_rate_brackets
+    br = parse_rate_brackets(st["brackets_mfj" if married else "brackets_single"])
+    std = _num(st["std_mfj" if married else "std_single"])
+    ex = _num(st["exempt_mfj" if married else "exempt_single"]) + n_dep * _num(st["exempt_dep"])
+    tax = bracket_tax(max(wages - std - ex, 0), br)
+    tax -= _num(st["credit_mfj" if married else "credit_single"]) + n_dep * _num(
+        st["credit_dep"])
+    return max(tax, 0.0)
+
+
+def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
+                    p: USParams, st: dict | None, mortgage_interest: float = 0.0,
+                    property_tax: float = 0.0) -> USResidentTax:
+    """Federal + state + local income tax and employee payroll taxes for a US-resident
+    couple (USD/year). Itemises when mortgage interest + SALT beat the standard
+    deduction; child tax credit with the refundable part."""
+    wages = [max(w, 0.0) for w in wages]
+    fica = sum(us_fica(w, p) for w in wages)
+    payroll = sum(wages) * _num(st.get("payroll_pct")) / 100 if st else 0.0
+    local_rate = _num(st.get("local_rate")) / 100 if st else 0.0
+    units = [(wages, n_ctc, n_dep)] if married else \
+        [([wages[0]], n_ctc, n_dep), ([wages[1]], 0, 0)]
+    fed = s_tax = loc = 0.0
+    for inc, kids, deps in units:
+        agi = sum(inc)
+        if agi <= 0:
+            continue
+        share = agi / max(sum(wages), 1e-9)
+        st_t = state_income_tax(agi, married, deps, st)
+        lo_t = agi * local_rate
+        salt = min(st_t + lo_t + property_tax * share, SALT_CAP if married else SALT_CAP)
+        itemized = salt + mortgage_interest * share
+        std = p.std_mfj if married else p.std_single
+        brackets = p.brackets_mfj if married else p.brackets_single
+        t = bracket_tax(max(agi - max(std, itemized), 0), brackets)
+        ctc = p.ctc * kids
+        phase = 400_000 if married else 200_000
+        ctc = max(ctc - 0.05 * max(agi - phase, 0), 0)
+        nonref = min(ctc, t)
+        refund = min(p.ctc_refundable * kids, ctc - nonref, max(0.15 * (agi - 2500), 0))
+        fed += t - nonref - refund
+        s_tax += st_t
+        loc += lo_t
+    return USResidentTax(fed, s_tax, loc, fica, payroll)
+
+
+def youth_tax_factor(iso3: str, age: int, gross: float, aw: float, years_working: int,
+                     mother_of_two: bool = False) -> float:
+    """Share of the income tax still due after age-based exemptions (2026 rules):
+    PL PIT-0 under 26 (to PLN 85,528); HU under 25 (to the average wage) and mothers of
+    two under 40 (2026); HR under 25 exempt, 25-30 half; PT IRS Jovem (<=35, first 10
+    working years: 100/75/50/25% of income up to ~EUR 28,700 exempt); GR 0% on the first
+    EUR 20k up to 25 and 9% (vs 22%) on the 10-20k band at 26-30."""
+    if gross <= 0:
+        return 1.0
+    if iso3 == "POL" and age < 26:
+        return 1 - min(1.0, 85_528 / gross)
+    if iso3 == "HUN":
+        if mother_of_two and age < 40:
+            return 0.0
+        if age < 25:
+            return 1 - min(1.0, aw / gross)
+    if iso3 == "HRV":
+        return 0.0 if age < 25 else 0.5 if age <= 30 else 1.0
+    if iso3 == "PRT" and age <= 35 and years_working < 10:
+        pct = 1.0 if years_working < 1 else 0.75 if years_working < 4 else \
+            0.5 if years_working < 7 else 0.25
+        return 1 - pct * min(1.0, 28_737 / gross)
+    if iso3 == "GRC":
+        if age <= 25:
+            return 1 - min(1.0, 20_000 / gross)
+        if age <= 30:
+            return 0.8
+    return 1.0

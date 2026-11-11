@@ -116,39 +116,55 @@ than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be 
 | Path | What |
 |---|---|
 | `build_econ_dataset.py` | Data pipeline: official sources -> tidy CSVs in `econ_data/` |
+| `econsim/params/*.csv` | Curated, sourced rules and market levels (see below); ship with the code |
+| `econsim/params.py` | Loads them |
 | `econsim/model.py` | `Sourced` (value + provenance), `CountryData`, `Plan` |
-| `econsim/data.py` | Builds `CountryData` from the derived CSVs (never reads `econ_long.csv`) |
-| `econsim/tax.py` | Local tax curves; US federal tax, FEIE + housing exclusion vs FTC, ACTC, FICA |
+| `econsim/data.py` | Builds `CountryData` from the derived CSVs + curated params (+ US state) |
+| `econsim/tax.py` | Local tax curves, joint taxation, youth exemptions; US residents (federal, state, local, FICA); US expats (FEIE/FTC) |
 | `econsim/engine.py` | Year-by-year simulation; `to_display()` for real/nominal and currency |
 | `app.py` | Streamlit + Plotly UI (no modelling code) |
-| `tests/` | `test_engine.py` (synthetic country), `test_app.py` (Streamlit AppTest) |
+| `tests/` | `test_engine.py` (synthetic country), `test_params.py` (curated rules), `test_app.py` (AppTest) |
 
-New derived tables for the simulator: `earnings_profile.csv` (annual gross by age band
-and percentile), `tax_curve.csv` (income tax + employee SSC at multiples of the average
-wage), `fx_ppp.csv`, `context_series.csv`.
+### Curated parameters (`econsim/params/`)
+
+Things no statistics API publishes comparably. Every value has a source and a quality grade
+(A statutory/official, B official but approximated, C estimate); the app's Sources tab lists them.
+
+| File | Contents |
+|---|---|
+| `housing.csv` | New-lease market rents (~70 m², excl. utilities); existing-home prices (national median per m² × 85 m², or per home) |
+| `lending.csv` | Minimum down payment (and for young buyers), payment-to-income / loan-to-income caps and stress rates, typical term, rate-fixation period and 2005-2025 average rate, transfer tax and closing costs, property tax, home insurance, mortgage-interest relief, borrower insurance |
+| `household.csv` (+ `household_sources.csv`) | Cars (price, insurance, tax, fuel, km, maintenance, tolls, transit pass), health premiums and out-of-pocket costs, parental leave (months, replacement, caps), free pre-school and school ages, compulsory occupational pension contributions, pension replacement rate, employer match, investment tax drag, wealth tax, typical wedding cost, long-run real wage growth |
+| `us_states.csv` | Census ACS 2024 (recent-mover rents, home values, property taxes, full-time earnings), BEA price parities, health-premium and car-insurance factors, state paid family leave |
+| `us_state_tax.csv` | 2026 state income tax brackets, deductions, exemptions (Tax Foundation), local income tax, state payroll taxes |
 
 ## Model in one paragraph
 
-Each partner's gross pay follows the country's cross-sectional age-earnings profile at
-the chosen percentile (the career-growth slider raises it to a power), plus economy-wide
-real wage growth and inflation. Each partner is taxed individually on the local average
-tax-rate curve. Child benefits are the OECD net-income difference with and without
-children. For US citizens abroad, the cheaper of FEIE + FTC and FTC-only is chosen each
-year; with FTC, the child credit becomes refundable. Spending is the survey couple
-budget (rent and mortgage handled separately), plus per-child spending, childcare, an
-expected emergency cost, the wedding, and the house purchase. The purchase waits until
-the deposit and costs can be paid without breaking the emergency fund, *and* the
-payment is under the payment-to-income cap. A job loss uses OECD net replacement rates
-month by month. Savings fill the emergency fund in cash first; the rest is invested.
+Each partner's gross pay follows the country's (or US state's) cross-sectional age-earnings
+profile at the chosen percentile, plus long-run real wage growth and inflation. Taxes use the
+local average tax-rate curve with joint taxation where it exists (DE/LU/PT/PL splitting, FR
+quotient familial), youth exemptions (PL, HU, HR, PT, GR) and compulsory occupational pension
+contributions (CH, NL, DK, IS, LI); US residents get federal + state + local tax and FICA,
+itemising mortgage interest and property tax when that wins. Births trigger the country's
+parental leave (benefit instead of pay for the typical months). An expected unemployment cost
+(rate by age × net pay × (1 − benefit replacement)) is deducted each year. Living costs are the
+survey couple's budget scaled by (income after housing / the survey households' income after
+housing)^0.6, with vehicles and health insurance replaced by explicit car and health modules;
+children add 20% of that budget each (33% from 14, OECD-modified scale) plus childcare until
+free pre-school. Renting uses new-lease market rents growing with real wages. The purchase
+waits until the down payment, taxes and fees are saved (keeping 6 months' buffer) and the loan
+fits the country's lending limits; fixed periods end at the long-run average rate. Savings are
+invested at the nominal return minus the country's tax drag (plus any employer match); pension
+rights are shown as replacement rate × final net pay × 15.
 
 ## Known limitations
 
-* Joint-taxation countries (DE, FR, PT, CH, LU, US) are slightly overstated for unequal couples.
-* Pensions are not modelled. The default horizon is the last working year.
-* Home price defaults for most of Europe are Deloitte **new-build, city-weighted**
-  prices per m² × 100 m²; a suburban resale home is usually cheaper. Countries without
-  Deloitte data use a price-to-income estimate (quality C).
-* EU HBS budgets are from 2015/2020 and rolled forward with HICP. "Two adults" includes older couples.
-* Switzerland, Iceland and Liechtenstein have no budget survey here. Their budgets are a
-  neighbouring country's quantities at local prices (Eurostat category PPPs, estimate).
-* US tax: no state tax for expats, no PFIC/NIIT, and excess FTC is not carried forward.
+* Several rents, home prices, car costs and wedding costs are estimates (quality C); edit
+  `econsim/params/*.csv` if you know better values.
+* Switzerland, Iceland and Liechtenstein have no budget survey here: a neighbouring country's
+  quantities at local prices (scaled to local incomes).
+* Family help (gifts, inheritances, living with parents) is not modelled; in Southern and
+  Eastern Europe it is how many young people buy.
+* Not modelled: means-tested health subsidies (CH premium reductions, NL zorgtoeslag),
+  Hungarian Babavaro loans, child benefits that vary with the child's age, part-time work after
+  children (use the leave slider / career growth), US expat state tax, PFIC/NIIT.

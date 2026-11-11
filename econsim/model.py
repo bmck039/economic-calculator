@@ -84,6 +84,18 @@ class CountryData:
     lcu_per_intl: Sourced
     totalization: bool
     notes: list[str] = field(default_factory=list)
+    # ---- curated rules (econsim/params) -------------------------------------------
+    hh: dict = field(default_factory=dict)           # household.csv row (cars, health, ...)
+    lend: dict = field(default_factory=dict)         # lending.csv row (limits, taxes, ...)
+    budget_ref_income: Optional[Sourced] = None      # net income of the survey households
+    budget_ref_housing: Optional[Sourced] = None     # their housing costs excl. utilities
+    rent_src_year: Optional[int] = None
+    unemp_youth: float = float("nan")                # % of labour force, 15-24
+    unemp_total: float = float("nan")                # %, 15-74
+    cpi: dict = field(default_factory=dict)          # year -> CPI index (rolls old data)
+    state: Optional[str] = None                      # US state code (USA only)
+    state_tax: Optional[dict] = None                 # us_state_tax.csv row
+    state_info: Optional[dict] = None                # us_states.csv row
 
 
 @dataclass
@@ -112,7 +124,8 @@ class Plan:
     wedding_cost: Optional[float] = None          # None -> data default
     child_ages: tuple[Optional[int], Optional[int]] = (32, 34)   # partner-1 age at birth
     childcare_from: int = 1          # child age childcare starts
-    childcare_to: int = 5            # last child age in paid childcare (school after)
+    childcare_to: Optional[int] = None  # last child age in full-time paid care; None ->
+    #                                  country (until free pre-school, then after-school care)
     child_dependent_to: int = 18     # last age with extra household spending
     buy_house_age: Optional[int] = 35             # None -> rent forever
     home_price: Optional[float] = None
@@ -120,16 +133,18 @@ class Plan:
     transfer_tax_pct: Optional[float] = None
     closing_cost_pct: float = 1.5    # notary, valuation, fees on top of transfer tax
     mortgage_rate: Optional[float] = None
-    mortgage_years: int = 25
-    max_payment_to_income: float = 40.0   # % of net income; banks cap debt service
-    owner_cost_pct: float = 1.0      # maintenance + property tax, % of home value / yr
-    home_real_appreciation: float = 0.5   # % per year above inflation
+    mortgage_years: Optional[int] = None  # None -> country typical term (25 without rules)
+    max_payment_to_income: Optional[float] = None  # % of net; None -> country lending rules
+    owner_cost_pct: Optional[float] = None  # upkeep+property tax+insurance %/yr; None -> country
+    home_real_appreciation: Optional[float] = None  # %/yr above inflation (homes AND rents);
+    #                                  None -> the real wage growth (constant price-to-income)
     rent: Optional[float] = None     # monthly, local; None -> data default
     budget_scale: float = 1.0        # lifestyle multiplier on the survey budget
     emergency_annual_cost: Optional[float] = None  # None -> 1 unexpected expense / yr
     emergency_fund_months: float = 6.0
     job_loss: Optional[JobLoss] = None
-    return_nominal: float = 5.0      # % per year on invested savings, after fees & tax
+    return_nominal: float = 5.0      # % per year on invested savings, after fees, BEFORE tax
+    #                                  (the country's tax drag is subtracted)
     cash_return: float = 2.0         # % per year on the emergency fund
     debt_rate: float = 9.0           # % per year if savings go negative
     inflation: Optional[float] = None             # None -> 2.0
@@ -137,3 +152,13 @@ class Plan:
     us_citizens: bool = True
     us_employer: bool = False        # True -> US FICA where no totalization agreement
     starting_savings: float = 0.0
+    # ---- realism options --------------------------------------------------------------
+    cars: Optional[int] = None       # cars owned; None -> country typical
+    unemployment_risk: bool = True   # deduct the expected cost of unemployment each year
+    primary_parent: int = 1          # earner index (0/1) taking the main parental leave
+    leave_scale: float = 1.0         # x the country's typical leave take-up
+    private_health: bool = False     # optional private cover (e.g. Ireland)
+    church_tax: bool = False         # Germany: 8-9% of income tax for church members
+    student_loan: float = 0.0        # balance at the start (local currency, per household)
+    budget_elasticity: float = 0.6   # spending rises with income^elasticity (vs survey couple)
+    state: Optional[str] = None      # US state (USA only); None -> national averages

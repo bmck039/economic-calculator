@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from econsim import params as PRM
 from econsim.data import DataStore
 from econsim.engine import simulate, to_display
 from econsim.model import Earner, JobLoss, Plan
@@ -42,6 +43,10 @@ GROUPS = {  # expense column -> display group (8 groups = 8 palette slots)
     "budget:health_insurance_mandatory": "Health & insurance",
     "budget:insurance_home": "Health & insurance", "budget:insurance_other": "Health & insurance",
     "children": "Children", "childcare": "Children",
+    "cars": "Transport", "public_transport": "Transport",
+    "health": "Health & insurance", "mortgage_insurance": "Housing",
+    "mortgage_interest_relief": "Housing", "wealth_tax": "Leisure & other",
+    "student_loan": "Emergencies & one-offs",
     "emergencies": "Emergencies & one-offs", "oneoff:wedding": "Emergencies & one-offs",
     "oneoff:house_purchase": "Emergencies & one-offs",
 }
@@ -89,11 +94,20 @@ default_c = "Netherlands" if "Netherlands" in iso_by_name else countries[0][1]
 cname = sb.selectbox("Country", [n for _, n in countries],
                      index=[n for _, n in countries].index(default_c))
 iso = iso_by_name[cname]
-cd = ds.country(iso)
+state = None
+if iso == "USA":
+    st_names = PRM.us_state_names()
+    st_codes = [None] + sorted(st_names, key=st_names.get)
+    state = sb.selectbox("US state", st_codes, format_func=lambda c: "National average"
+                         if c is None else st_names[c],
+                         help="State earnings, rents, home prices, property tax, state income "
+                              "tax, price level, health premiums, car insurance and paid "
+                              "family leave.")
+cd = ds.country(iso, state)
 cmp_names = sb.multiselect("Compare with (up to 3 total)", [n for _, n in countries if n != cname],
                            default=[n for n in ("United States", "Germany") if n != cname
                                     and n in iso_by_name][:2], max_selections=2)
-K = lambda name: f"{name}_{iso}"  # noqa: E731  (per-country keys -> defaults reset)
+K = lambda name: f"{name}_{iso}_{state}"  # noqa: E731  (per-country keys -> defaults reset)
 
 with sb.expander("👫 Partners & career", expanded=True):
     c1, c2 = st.columns(2)
@@ -112,8 +126,8 @@ with sb.expander("👫 Partners & career", expanded=True):
     g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1)
     retire = st.slider("Retirement age (earnings stop)", 50, 75, 67)
     horizon = st.slider("Simulate until P1 age", int(a1) + 5, 95, max(retire - 1, int(a1) + 5),
-                        help="Default: the last working year. Later years show drawdown "
-                             "with no pension income (pensions are not modelled).")
+                        help="Default: the last working year. Pension rights are shown "
+                             "separately (OECD net replacement rate x final net pay).")
     savings0 = st.number_input(f"Current savings ({cd.currency})", 0.0, 1e9, 0.0, 1000.0,
                                key=K("sav0"))
     st.caption(f"Earnings: {cd.earnings_src.label}{flag(cd.earnings_src)}. "
@@ -130,10 +144,21 @@ with sb.expander("💍 Marriage & kids"):
                       index=kid_opts.index(max(int(a1), 30)) if max(int(a1), 30) in kid_opts else 0)
     k2 = st.selectbox("Child 2 born at P1 age", kid_opts,
                       index=kid_opts.index(max(int(a1), 33)) if max(int(a1), 33) in kid_opts else 0)
-    cc_from, cc_to = st.slider("Paid childcare between child ages", 0, 6, (1, 5))
-    cspend = st.number_input(f"Extra household spending per child ({cd.currency}/month)", 0.0,
-                             1e6, float(round(cd.child_extra_spending.value)), 25.0, key=K("cs"),
-                             help=src(cd.child_extra_spending))
+    hh = cd.hh or {}
+    cc_from = st.slider("Paid childcare from child age", 0, 3, 1,
+                        help="Usually when paid parental leave ends.")
+    st.caption(f"Full-time paid care until free pre-school at age "
+               f"{hh.get('free_childcare_from', 5):g}, then after-school care (20%) to 10; "
+               f"school from {hh.get('school_age', 6):g}. Child living costs: OECD-modified "
+               "equivalence scale (+20% of the couple budget per child, +33% from 14).")
+    cc_to = None
+    leave_who = st.radio("Main parental leave taken by", ["Partner 1", "Partner 2"], index=1,
+                         horizontal=True)
+    lv1 = hh.get('leave1_months', 0) + hh.get('leave2_months', 0)
+    leave_scale = st.slider("Parental leave vs country typical", 0.0, 2.0, 1.0, 0.1,
+                            help=f"Typical: {lv1:.1f} months for the main parent, "
+                                 f"{hh.get('partner_leave_months', 0):.1f} for the other "
+                                 "(OECD Family Database; national rules).")
     ccare = st.number_input(f"Childcare per child in care ({cd.currency}/year)", 0.0, 1e7,
                             float(round(cd.childcare_per_child.value)), 100.0, key=K("cc"),
                             help=src(cd.childcare_per_child))
@@ -155,22 +180,49 @@ with sb.expander("🏡 Housing"):
                          key=K("tt"), help=src(cd.transfer_tax_pct, "{:.2f}"))
     mr = c1.number_input("Mortgage rate %", 0.0, 25.0, float(round(cd.mortgage_rate.value, 2)),
                          0.05, key=K("mr"), help=src(cd.mortgage_rate, "{:.2f}"))
-    term = c2.number_input("Term (years)", 5, 40, 25)
-    owner = c1.number_input("Upkeep + property tax %/yr", 0.0, 5.0, 1.0, 0.1,
-                            help="Assumption: maintenance and property tax as % of home value.")
-    appr = c2.number_input("Real house-price growth %/yr", -5.0, 5.0, 0.5, 0.1,
-                           help="Assumption: growth above inflation.")
-    dsti = st.slider("Max mortgage payment, % of net income", 20, 60, 40,
-                     help="Banks / macro-prudential rules cap debt service (typically 35-50% "
-                          "of net income). The purchase waits until it fits.")
+    L = cd.lend or {}
+    term_d = int(L.get("term") or 0) or 25
+    term = c2.number_input("Term (years)", 5, 50, term_d, key=K("term"),
+                           help="Country typical maximum. Switzerland: the first mortgage is "
+                                "interest-only; the part above 2/3 of the price is repaid in 15y.")
+    owner_d = round(0.7 + (L.get("property_tax_pct") or 0) + (L.get("home_ins_pct") or 0), 2) \
+        if L else 1.0
+    owner = c1.number_input("Upkeep + property tax + insurance %/yr", 0.0, 5.0, owner_d, 0.05,
+                            key=K("own"), help=f"Default: 0.7% upkeep + "
+                            f"{L.get('property_tax_pct', 0):g}% property tax + "
+                            f"{L.get('home_ins_pct', 0):g}% home insurance.")
+    appr_d = float(round(cd.real_wage_growth_hist.value, 2))
+    appr = c2.number_input("Real house-price & rent growth %/yr", -5.0, 5.0, appr_d, 0.1,
+                           key=K("appr"),
+                           help="Default = real wage growth (price-to-income stays constant).")
+    rules = st.checkbox("Use the country's lending rules", True,
+                        help=str(L.get("source", "")) or "No curated rules: 40% of net income.")
+    dsti = st.slider("Max mortgage payment, % of net income", 20, 60, 40, disabled=rules)
+    if L:
+        st.caption(f"Lending: min. down {L['down_pct']:g}%"
+                   + (f" ({L['down_pct_young']:g}% to age {L['young_max_age']:g})"
+                      if L.get('young_max_age') and L['down_pct_young'] != L['down_pct'] else "")
+                   + (f", payment ≤ {L['dsti_max']:g}% of {L['dsti_basis']} income"
+                      if L.get('dsti_max') else "")
+                   + (f", loan ≤ {L['lti_max']:g}× gross" if L.get('lti_max') else "")
+                   + f"; rate fixed {L['fixation_years']:g}y, then {L['rate_longrun']:g}% "
+                   "(2005-2025 average).")
+    cars_d = int(hh.get("cars", 1) or 1) if hh else 1
+    cars = st.number_input("Cars owned", 0, 3, cars_d, key=K("cars"),
+                           help="Depreciation, insurance (young-driver surcharge), road tax, "
+                                "fuel, maintenance, tolls; adults without a car get a "
+                                "public-transport pass.")
     budget_scale = st.slider("Lifestyle vs survey average couple", 0.5, 2.0, 1.0, 0.05,
                              help="Scales the survey budget (food, transport, leisure, ...).")
 
 with sb.expander("🚨 Emergencies & job loss"):
-    emerg = st.number_input(f"Expected unexpected costs ({cd.currency}/year)", 0.0, 1e7,
+    emerg = st.number_input(f"Extra unexpected costs ({cd.currency}/year)", 0.0, 1e7,
                             float(round(cd.emergency_expense_size.value)), 50.0, key=K("em"),
                             help=src(cd.emergency_expense_size) +
-                            " Default: one such shock per year.")
+                            " Stress test: e.g. one such shock per year.")
+    urisk = st.checkbox("Deduct the average cost of unemployment", True,
+                        help="Each year: unemployment rate for the age (youth rate under 25) x "
+                             "net pay x (1 - benefit replacement).")
     efund = st.slider("Emergency fund target (months of spending)", 0.0, 24.0, 6.0, 0.5)
     jl_on = st.checkbox("Simulate a job loss")
     c1, c2, c3 = st.columns(3)
@@ -181,17 +233,31 @@ with sb.expander("🚨 Emergencies & job loss"):
         st.caption("Net replacement rates (OECD TaxBEN, couple, latest): " + ", ".join(
             f"{m} mo {s.value:.0f}%" for m, s in sorted(cd.nrr.items())))
 
+with sb.expander("🧾 Other costs & options"):
+    sloan = st.number_input(f"Student loans at the start ({cd.currency}, household)", 0.0, 1e7,
+                            0.0, 1000.0, key=K("sl"),
+                            help="UK: 9% of pay above GBP 25,000 (Plan 5), written off after 40"
+                                 " years. Elsewhere: 10-year repayment at 6.4%.")
+    church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
+                         disabled=iso != "DEU")
+    priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
+    elast = st.slider("How much spending follows income", 0.0, 1.0, 0.6, 0.05,
+                      help="Living costs = survey couple's budget x (your income after housing"
+                           " / theirs)^this. 0 = always the survey average; 1 = proportional.")
+
 with sb.expander("📈 Returns, growth & display"):
     c1, c2 = st.columns(2)
-    ret = c1.number_input("Investment return %/yr (nominal, after fees/tax)", -5.0, 15.0, 5.0, 0.25)
+    ret = c1.number_input("Investment return %/yr (nominal, after fees, before tax)", -5.0, 15.0,
+                          5.0, 0.25, help=f"Tax drag for {cd.name}: "
+                          f"{(cd.hh or {}).get('invest_tax_drag', 0):g} pp/yr (main tax-"
+                          "advantaged route).")
     cash_r = c2.number_input("Cash (emergency fund) %/yr", 0.0, 10.0, 2.0, 0.25)
     infl = c1.number_input("Inflation %/yr", -2.0, 15.0, 2.0, 0.1,
                            help=src(cd.inflation_hist, "{:.2f}") + " Default 2% (target).")
-    rwg_d = float(min(max(cd.real_wage_growth_hist.value, 0.0), 1.0)) \
+    rwg_d = float(cd.real_wage_growth_hist.value) \
         if cd.real_wage_growth_hist.value == cd.real_wage_growth_hist.value else 0.5
     rwg = c2.number_input("Real wage growth %/yr (economy-wide)", -3.0, 5.0, round(rwg_d, 2),
-                          0.05, key=K("rwg"), help=src(cd.real_wage_growth_hist, "{:.2f}") +
-                          " Default clipped to 0-1%.")
+                          0.05, key=K("rwg"), help=src(cd.real_wage_growth_hist, "{:.2f}"))
     real = st.toggle("Show in today's money (real)", True)
     cur = st.radio("Currency", ["local", "USD", "intl$"], horizontal=True,
                    format_func={"local": f"Local ({cd.currency})", "USD": "USD",
@@ -219,8 +285,11 @@ def build_plan(iso3: str, override: bool) -> Plan:
         child_ages=(None if k1 == "none" else int(k1), None if k2 == "none" else int(k2)),
         childcare_from=cc_from, childcare_to=cc_to,
         buy_house_age=int(buy_age) if mode == "Buy a home" else None,
-        mortgage_years=int(term), owner_cost_pct=owner, home_real_appreciation=appr,
-        max_payment_to_income=float(dsti),
+        max_payment_to_income=None if rules else float(dsti),
+        cars=int(cars) if override else None, unemployment_risk=urisk,
+        primary_parent=0 if leave_who == "Partner 1" else 1, leave_scale=leave_scale,
+        private_health=priv_h, church_tax=church, student_loan=float(sloan) if override else 0.0,
+        budget_elasticity=elast, state=state if iso3 == "USA" else None,
         budget_scale=budget_scale, emergency_fund_months=efund, job_loss=jl,
         return_nominal=ret, cash_return=cash_r,
         inflation=None if abs(infl - 2.0) < 1e-9 else infl, us_citizens=us_cit,
@@ -237,13 +306,15 @@ def build_plan(iso3: str, override: bool) -> Plan:
                     mortgage_rate=ov(mr, cd.mortgage_rate.value, 2),
                     rent=ov(rent, cd.rent.value), emergency_annual_cost=ov(
                         emerg, cd.emergency_expense_size.value),
-                    real_wage_growth=ov(rwg, rwg_d, 2))
+                    real_wage_growth=ov(rwg, rwg_d, 2),
+                    owner_cost_pct=ov(owner, owner_d, 2),
+                    home_real_appreciation=ov(appr, appr_d, 2),
+                    mortgage_years=None if int(term) == term_d else int(term))
     return p
 
 
 def country_with_overrides(c):
-    return replace(c, child_extra_spending=c.child_extra_spending.with_value(cspend),
-                   childcare_per_child=c.childcare_per_child.with_value(ccare)) \
+    return replace(c, childcare_per_child=c.childcare_per_child.with_value(ccare)) \
         if c.iso3 == iso else c
 
 
@@ -272,8 +343,13 @@ kc[0].metric("Household net income now", f"{d0['net_income'] / 12:,.0f}/mo",
 kc[1].metric("Spending now", f"{d0['expenses_recurring'] / 12:,.0f}/mo")
 kc[2].metric("Saving now", f"{d0['saving'] / 12:,.0f}/mo",
              f"{d0['saving_rate'] * 100:.0f}% of net")
+conv = {"local": 1.0, "USD": cd.lcu_per_usd.value, "intl$": cd.lcu_per_intl.value}[cur]
+pw = res.summary.get("pension_wealth_real", 0.0) / conv
 kc[3].metric(f"Net worth at {int(last['age1'])}", f"{last['net_worth']:,.0f}",
-             help="Liquid savings + home equity.")
+             f"+ pension rights ≈ {pw:,.0f}", delta_color="off", delta_arrow="off",
+             help="Liquid savings + home equity. Pension rights: OECD net replacement rate "
+                  f"({res.summary.get('pension_nrr', 0):.0f}%, mandatory schemes) x final net "
+                  "pay x 15 (value of a pension from 67, today's money).")
 kc[4].metric("Avg tax rate now", f"{d0['local_tax_rate'] * 100:.0f}%",
              f"US residual {d0['us_tax'] / 12:,.0f}/mo" if us_cit and iso != "USA" else None,
              delta_color="off", delta_arrow="off")
@@ -304,7 +380,8 @@ tabs = st.tabs(["💶 Monthly budget", "📈 Savings", "💼 Income", "🧾 Taxe
 with tabs[0]:
     exp_cols = [c for c in disp.columns if c.startswith(("budget:", "oneoff:")) or c in
                 ("rent", "mortgage_payment", "owner_costs", "children", "childcare",
-                 "emergencies")]
+                 "emergencies", "cars", "public_transport", "health", "mortgage_insurance",
+                 "mortgage_interest_relief", "wealth_tax", "student_loan")]
     grp = pd.DataFrame({"age": disp["age1"]})
     for c in exp_cols:
         g = group_of(c)
@@ -401,9 +478,11 @@ with tabs[3]:
                     width="stretch")
     st.caption(f"Local tax curve: {cd.tax_src.label}{flag(cd.tax_src)} — average income-tax "
                "and employee social-security rates at multiples of the national average "
-               f"wage ({cd.avg_wage.value:,.0f} {cd.currency}/yr), each partner taxed "
-               "individually (joint-filing countries slightly overstated for unequal "
-               "couples). US: 2026 IRS brackets indexed by inflation; FEIE "
+               f"wage ({cd.avg_wage.value:,.0f} {cd.currency}/yr); income splitting for "
+               "married couples in DE/LU/PT/PL, quotient familial in FR, youth exemptions "
+               "(PL, HU, HR, PT, GR); compulsory occupational pension contributions (CH, NL, "
+               "DK, IS, LI). US residents: federal + state + local tax and FICA computed "
+               "directly. US citizens abroad: 2026 IRS brackets indexed by inflation; FEIE "
                f"${us.feie:,.0f}/person + housing exclusion vs FTC, cheaper route each year.")
     if us_cit and iso != "USA":
         meth = res.years["us_method"].replace("", pd.NA).dropna()
@@ -425,7 +504,7 @@ with tabs[4]:
     rows, curves = [], []
     for n in sel:
         c_iso = iso_by_name[n]
-        c = ds.country(c_iso)
+        c = ds.country(c_iso, state if c_iso == "USA" else None)
         p = build_plan(c_iso, c_iso == iso)
         r = simulate(p, country_with_overrides(c), us)
         d = to_display(r, c, real, "intl$" if cur == "local" else cur)
@@ -532,7 +611,6 @@ with tabs[6]:
     add("tax curve", cd.tax_src)
     add("average wage (tax curve)", cd.avg_wage)
     add("child benefit per child /yr", cd.child_benefit_per_child)
-    add("extra spending per child /mo", cd.child_extra_spending, cspend)
     add("childcare per child /yr", cd.childcare_per_child, ccare)
     add("down payment (data default)", cd.down_payment_pct)
     add("mortgage rate (data default)", cd.mortgage_rate)
@@ -552,7 +630,14 @@ with tabs[6]:
     st.caption("Quality: A = official statistics, B = industry survey / model, C = rough or "
                "derived. ESTIMATE = not directly observed (nowcast, interpolation, proxy, "
                "assumption). Money values are in the source's price year and are rolled to "
-               f"{plan.start_year} with the inflation assumption. Edit reference values in "
-               "econ_data/reference_values.csv and rebuild with --reference.")
+               f"{plan.start_year} with actual CPI, then the inflation assumption. Curated "
+               "rules and market levels (rents, home prices, lending rules, health, cars, "
+               "leave, pensions, US states) live in econsim/params/*.csv with their sources.")
+    hh_rows = [{"parameter": k, "value": v, "source": PRM._hh_sources().get(k, ("", ""))[0],
+                "quality": PRM._hh_sources().get(k, ("", ""))[1]}
+               for k, v in (cd.hh or {}).items() if v == v]
+    if hh_rows:
+        st.markdown("**Household rules for this country** (econsim/params/household.csv)")
+        st.dataframe(pd.DataFrame(hh_rows), hide_index=True, width="stretch")
     st.download_button("Download simulation (CSV)", disp.to_csv(index=False),
                        f"life_plan_{iso}.csv", "text/csv")

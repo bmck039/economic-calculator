@@ -168,7 +168,9 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #   2: FRED fix - builds before it could silently lack all US earnings (no USA rows).
 #   3: PRT/ROU budgets no longer include rent (unsplit COICOP 04); Canada mortgage rate
 #      = rate paid on new insured loans, not the posted rate.
-DATA_VERSION = "3"
+#   4: life_events gains the SILC income and housing costs of the survey households
+#      (the app scales living costs with income after housing; v0.2.0 needs them).
+DATA_VERSION = "4"
 
 # ==========================================================================
 # Comparability notes
@@ -3229,6 +3231,29 @@ def derive_life_events(long: pd.DataFrame, ctx: Ctx, home_m2: float) -> pd.DataF
     for _, r in ctx.refs[ctx.refs["topic"] == "emergency"].iterrows():
         add(r["iso3"], "emergency", r["item"], r["value"], r["unit"], r["as_of"], r["source"],
             r["note"], r["quality"])
+    # ---- income of the households behind the survey budget (all years; the app picks
+    # the one matching the HBS survey year and scales the budget with the simulated
+    # couple's income relative to it)
+    si = long[(long["measure"] == "household_income") &
+              (long["series"].astype(str) == "ilc_di04:A2_2LT65") &
+              long["unit"].astype(str).str.startswith("NAC")]
+    for (iso3, year), s in si.groupby(["iso3", "year"]):
+        add(iso3, "budget", "silc_median_equivalised_A2_lt65", float(s["value"].iloc[0]),
+            LOCAL_CURRENCY.get(iso3, "EUR") + "/year (equivalised)", int(year),
+            "Eurostat EU-SILC ilc_di04 (two adults younger than 65)",
+            "median equivalised net income; SILC year = income year + 1", "A")
+    # housing costs of the same (two-adult, all tenures) households: the budget scaling
+    # works on income AFTER housing, so renters are not given owners' spending power
+    hc = long[(long["statistic"] == "mean_total_housing_cost") &
+              (long["category"].astype(str) == "Total") &
+              (long["household_type"].astype(str) == "Two adults")]
+    for (iso3, year), s in hc.groupby(["iso3", "year"]):
+        nac = ctx.nac_per_pps(iso3, int(year))
+        if nac:
+            add(iso3, "budget", "silc_A2_mean_housing_cost", float(s["value"].iloc[0]) * nac,
+                LOCAL_CURRENCY.get(iso3, "EUR") + "/month", int(year),
+                "Eurostat EU-SILC ilc_mded03 (two adults, all tenures)",
+                "mean total housing cost incl. utilities, net of allowances; PPS x PPP", "A")
     return pd.DataFrame(out)
 
 

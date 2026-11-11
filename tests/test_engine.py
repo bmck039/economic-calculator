@@ -151,7 +151,8 @@ def test_wedding_is_one_off():
 
 
 def test_house_purchase_and_mortgage_amortisation():
-    r = simulate(plan(buy_house_age=33, starting_savings=150000), country())
+    r = simulate(plan(buy_house_age=33, starting_savings=150000,
+                      home_real_appreciation=0.5), country())
     d = r.years
     t = 33 - 28
     assert d["owned"].iloc[t] and not d["owned"].iloc[t - 1]
@@ -213,7 +214,7 @@ def test_feie_route_gets_no_refundable_child_credit():
 
 
 def test_payment_to_income_cap_blocks_unaffordable_house():
-    cd = country(home_price=S(3_000_000.0))
+    cd = country(home_price=S(30_000_000.0))
     r = simulate(plan(buy_house_age=30, starting_savings=2_000_000), cd)
     assert not r.years["owned"].any()
     assert any("payment" in w for w in r.warnings)
