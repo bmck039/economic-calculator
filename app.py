@@ -16,7 +16,7 @@ import streamlit as st
 
 from econsim import params as PRM
 from econsim.data import DataStore
-from econsim.engine import simulate, to_display
+from econsim.engine import horizon_default, resolve, simulate, to_display
 from econsim.model import EDUCATION, TERTIARY, Earner, JobLoss, Plan, age_band
 
 st.set_page_config(page_title="Life Abroad Planner", layout="wide", page_icon="🌍")
@@ -42,7 +42,8 @@ GROUPS = {  # expense column -> display group (8 groups = 8 palette slots)
     "budget:insurance_health": "Health & insurance",
     "budget:health_insurance_mandatory": "Health & insurance",
     "budget:insurance_home": "Health & insurance", "budget:insurance_other": "Health & insurance",
-    "children": "Children", "childcare": "Children",
+    "children": "Children", "childcare": "Children", "university": "Children",
+    "long_term_care": "Health & insurance",
     "cars": "Transport", "public_transport": "Transport",
     "health": "Health & insurance", "mortgage_insurance": "Housing",
     "mortgage_interest_relief": "Housing", "wealth_tax": "Leisure & other",
@@ -144,10 +145,18 @@ with sb.expander("👫 Partners & career", expanded=True):
                    help="1.0 = follow the country's age-earnings profile (cross-section of "
                         "today's workers by age). 0 = flat career; 2 = twice as steep.")
     g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1)
-    retire = st.slider("Retirement age (earnings stop)", 50, 75, 67)
-    horizon = st.slider("Simulate until P1 age", int(a1) + 5, 95, max(retire - 1, int(a1) + 5),
-                        help="Default: the last working year. Pension rights are shown "
-                             "separately (OECD net replacement rate x final net pay).")
+    ra = cd.retirement_age
+    retire_d = int(round(ra.value)) if ra is not None else 67
+    retire = st.slider("Retirement age (pay stops, pension starts)", 50, 80, retire_d,
+                       key=K("ret"), help=(src(ra, "{:g}") if ra is not None else
+                                           "No OECD data: 67.") + " Today's young workers "
+                       "retire later than today's retirees where the retirement age is "
+                       "linked to life expectancy (e.g. Denmark, Estonia, Italy, Sweden).")
+    hz = horizon_default(Plan(country=iso, earners=(Earner(int(a1)), Earner(int(a2)))), cd)
+    horizon_d = max(int(hz.value), int(a1) + 5)
+    horizon = st.slider("Simulate until P1 age", int(a1) + 5, 105, horizon_d, key=K("hz"),
+                        help=src(hz, "{:g}") + " The pension is paid from the retirement age, "
+                             "indexed to prices; savings are drawn down slowly.")
     savings0 = st.number_input(f"Current savings ({cd.currency})", 0.0, 1e9, 0.0, 1000.0,
                                key=K("sav0"))
     st.caption(f"Earnings: {cd.earnings_src.label}{flag(cd.earnings_src)}. "
@@ -234,10 +243,29 @@ with sb.expander("🏡 Housing"):
                             key=K("own"), help=f"Default: 0.7% upkeep + "
                             f"{L.get('property_tax_pct', 0):g}% property tax + "
                             f"{L.get('home_ins_pct', 0):g}% home insurance.")
+    h_opts = ["With incomes", "Recent trend (10 yrs)", "Custom"]
+    ht, rt = cd.home_trend, cd.rent_trend
+    h_out = st.radio("House prices & rents", h_opts, horizontal=True, key=K("hout"),
+                     help="With incomes: prices and rents grow with real wages (constant "
+                          "price-to-income, the long-run norm). Recent trend: the last ~20 "
+                          "years' real growth continues for 10 years, then with incomes"
+                          + (f" (homes {ht.value:+.1f}%/yr, {ht.year}" if ht else " (no index")
+                          + (f"; rents {rt.value:+.1f}%/yr)." if rt else ").")
+                          + " Custom: your own rate for both.")
     appr_d = float(round(cd.real_wage_growth_hist.value, 2))
     appr = c2.number_input("Real house-price & rent growth %/yr", -5.0, 5.0, appr_d, 0.1,
-                           key=K("appr"),
-                           help="Default = real wage growth (price-to-income stays constant).")
+                           key=K("appr"), disabled=h_out != "Custom",
+                           help="Custom only. Default = real wage growth.")
+    r_out = st.radio("After the fixed period, the mortgage rate is", ["Market outlook",
+                                                                       "20-year average"],
+                     horizontal=True, help="Market outlook: today's mortgage rate moved by "
+                     "the change in short rates the market expects (10-year yield - 0.5 term "
+                     "premium vs today's 3-month rate)"
+                     + (f": {R_m['mortgage_rate_future']:.2f}%" if (R_m := cd.rates or {})
+                        .get("mortgage_rate_future") is not None else " (no data here)")
+                     + ". 20-year average: the mean rate on new mortgages since ~2005"
+                     + (f": {L['rate_longrun']:g}%." if (L := cd.lend or {}).get("rate_longrun")
+                        else "."))
     rules = st.checkbox("Use the country's lending rules", True,
                         help=str(L.get("source", "")) or "No curated rules: 40% of net income.")
     dsti = st.slider("Max mortgage payment, % of net income", 20, 60, 40, disabled=rules)
@@ -248,8 +276,7 @@ with sb.expander("🏡 Housing"):
                    + (f", payment ≤ {L['dsti_max']:g}% of {L['dsti_basis']} income"
                       if L.get('dsti_max') else "")
                    + (f", loan ≤ {L['lti_max']:g}× gross" if L.get('lti_max') else "")
-                   + f"; rate fixed {L['fixation_years']:g}y, then {L['rate_longrun']:g}% "
-                   "(2005-2025 average).")
+                   + f"; rate fixed {L['fixation_years']:g}y.")
     cars_d = int(hh.get("cars", 1) or 1) if hh else 1
     cars = st.number_input("Cars owned", 0, 3, cars_d, key=K("cars"),
                            help="Depreciation, insurance (young-driver surcharge), road tax, "
@@ -277,11 +304,38 @@ with sb.expander("🚨 Emergencies & job loss"):
         st.caption("Net replacement rates (OECD TaxBEN, couple, latest): " + ", ".join(
             f"{m} mo {s.value:.0f}%" for m, s in sorted(cd.nrr.items())))
 
+# defaults the engine would use for the primary country (rates, portfolio, loans)
+D_ = resolve(Plan(country=iso, earners=(Earner(int(a1), p1, g1, education=d1),
+                                        Earner(int(a2), p2, g2, education=d2))), cd)
+
+with sb.expander("🎓 Student debt"):
+    sd = cd.student_debt or {}
+    # typical borrower's debt per partner's degree (the engine moves it to today's money;
+    # only partners up to 30 are assumed to still owe it)
+    sl_typ = round(sum(sd[e].value for e, a in ((d1, a1), (d2, a2)) if e in sd and a <= 30),
+                   -2)
+    sloan = st.number_input(f"Student debt at the start ({cd.currency}, both of us)", 0.0,
+                            1e7, float(sl_typ), 1000.0, key=K(f"sl{d1}{d2}"),
+                            help=("Default: the typical borrower's debt for each partner's "
+                                  "degree - " + "; ".join(
+                                      f"{EDU_SHORT.get(k, k)}: {v.value:,.0f} ({v.source}, "
+                                      f"{v.year})" for k, v in sd.items()) + ". Not everyone "
+                                  "borrows: set 0 if you have none.") if sd else
+                            "No national figure: tuition is low and loans small or absent.")
+    c1, c2 = st.columns(2)
+    slr_d = float(D_["student_loan_rate"]["value"])
+    sl_rate = c1.number_input("Interest %/yr", 0.0, 20.0, slr_d, 0.05, key=K("slr"),
+                              disabled=sloan == 0,
+                              help=D_["student_loan_rate"]["source"] + (
+                                  f" ({D_['student_loan_rate']['note']})"
+                                  if D_["student_loan_rate"].get("note") else ""))
+    sl_years = c2.number_input("Repaid over (years)", 1, 30, 10, key=K("sly"),
+                               disabled=sloan == 0 or iso == "GBR",
+                               help="Fixed monthly payments (US standard plan: 10 years; "
+                                    "income-driven plans run 20-25). UK: 9% of pay above "
+                                    "GBP 25,000 instead, written off after 40 years.")
+
 with sb.expander("🧾 Other costs & options"):
-    sloan = st.number_input(f"Student loans at the start ({cd.currency}, household)", 0.0, 1e7,
-                            0.0, 1000.0, key=K("sl"),
-                            help="UK: 9% of pay above GBP 25,000 (Plan 5), written off after 40"
-                                 " years. Elsewhere: 10-year repayment at 6.4%.")
     church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
                          disabled=iso != "DEU")
     priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
@@ -300,19 +354,108 @@ with sb.expander("🧾 Other costs & options"):
                           "couples report struggling to make ends meet a little better, but "
                           "makes buying implausibly hard in e.g. the UK.")
 
+with sb.expander("👪 Family help & later life"):
+    c1, c2 = st.columns(2)
+    gift = c1.number_input(f"Gift from family ({cd.currency}, today's money)", 0.0, 1e9, 0.0,
+                           5000.0, key=K("gift"),
+                           help="E.g. help with a deposit. Arrives at the age on the right "
+                                "(default: the planned buying age). Common in Southern and "
+                                "Eastern Europe, where many young people buy with family help.")
+    gift_age = c2.number_input("Gift at P1 age (0 = buying age)", 0, 100, 0, key=K("gifta"))
+    inh = c1.number_input(f"Inheritance ({cd.currency}, after tax)", 0.0, 1e9, 0.0, 10000.0,
+                          key=K("inh"))
+    le_now = cd.le65.get(("female", max((y for s_, y in cd.le65 if s_ == "female"),
+                                        default=0))) if cd.le65 else None
+    inh_d = int(round(le_now)) - 30 if le_now else 55
+    inh_age = c2.number_input("Inheritance at P1 age", 18, 100, max(inh_d, int(a1)),
+                              key=K("inha"), help="Default: when parents ~30 years older "
+                              "reach today's life expectancy at 65 (women).")
+    uc = cd.university_cost
+    uni = st.slider("Parents pay this share of children's university", 0, 100, 0, 10,
+                    help=(f"{src(uc)}. " if uc is not None else "No OECD data. ")
+                    + "Paid per child for the years below from age 18; living costs while "
+                      "at home are already counted (children live at home until the leaving "
+                      "age).")
+    uni_y = st.number_input("University years per child", 1, 8, 4)
+    wpen = st.slider("Main parent's lasting pay penalty after children (%)", 0, 20, 0,
+                     help="Hourly pay that never catches up (missed promotions, more family-"
+                          "friendly jobs) on top of the hours and employment effect above. In "
+                          "Denmark the long-run earnings gap after children is ~20%, about a "
+                          "third each from participation, hours and wage rates (Kleven, "
+                          "Landais & Søgaard 2019) - i.e. ~7%.")
+    c1, c2 = st.columns(2)
+    ltc_y = c1.number_input("Years of paid long-term care", 0, 15, 0,
+                            help="For one partner, at the end of the plan.")
+    ltc_d = 74_400 * cd.lcu_per_usd.value if iso == "USA" else 0.0
+    ltc_c = c2.number_input(f"Care cost per year ({cd.currency})", 0.0, 1e7, float(ltc_d),
+                            1000.0, key=K("ltc"), disabled=ltc_y == 0,
+                            help="US default: CareScout 2025 median assisted living ($74,400; "
+                                 "private nursing-home room $129,575). Elsewhere public "
+                                 "long-term care covers most of the cost: enter the local "
+                                 "out-of-pocket amount.")
+    spend_down = st.radio("In retirement we spend", ["Pension + savings",
+                                                     "Only the pension"],
+                          horizontal=True,
+                          help="Pension + savings: spending = pension + savings / years "
+                               "left, as US minimum distributions (which most retirees' "
+                               "withdrawals track). Only the pension: savings are left "
+                               "untouched (to heirs, or for care) unless the pension can't "
+                               "cover basic costs.") == "Pension + savings"
+
 with sb.expander("📈 Returns, growth & display"):
     c1, c2 = st.columns(2)
-    ret = c1.number_input("Investment return %/yr (nominal, after fees, before tax)", -5.0, 15.0,
-                          5.0, 0.25, help=f"Tax drag for {cd.name}: "
+    R_ = cd.rates or {}
+    dep_hh, eq_hh = D_["deposit_share"]["value"], D_["equity_share"]["value"]
+    hold = st.radio("How we hold our savings", [f"Like typical households",
+                                               "Invest everything", "Custom"],
+                    help="Above the emergency fund. Typical: the split households in "
+                         f"{cd.name} actually hold - {dep_hh:.0f}% in bank deposits; of the "
+                         f"rest {eq_hh:.0f}% in shares and funds (OECD financial balance "
+                         "sheets; national totals lean toward wealthier households, so a "
+                         "typical family holds even more in the bank). Invest everything: no "
+                         "deposits beyond the emergency fund.")
+    c3, c4 = st.columns(2)
+    dep = c3.slider("% kept in bank deposits", 0, 100, int(round(dep_hh)) if hold.startswith(
+        "Like") else 0, 5, disabled=hold != "Custom", key=K(f"dep{hold}"))
+    eq = c4.slider("% of investments in shares", 0, 100, int(round(eq_hh)) if hold.startswith(
+        "Like") else 60, 5, disabled=hold == "Like typical households", key=K(f"eq{hold}"),
+        help="The rest in bonds. Default return = today's 10-year government yield (the "
+             "market's price for the next decade) + this share x a 3.5% equity premium - "
+             "0.2% fees. 3.5% lies between the world equity premium over bonds since 1900 "
+             "(~3%, Dimson-Marsh-Staunton) and current implied estimates (~4%).") / 100
+    y10 = R_.get("y10")
+    ret_d = round(y10 + eq * 3.5 - 0.2, 2) if y10 is not None else 5.0
+    ret = c1.number_input("Investments %/yr (nominal, after fees, before tax)", -5.0, 15.0,
+                          ret_d, 0.25, key=K(f"ret{eq}"),
+                          help=(f"10-year yield {y10:.2f}% ({R_.get('y10_source')}, "
+                                f"{R_.get('y10_period')}). " if y10 is not None else
+                                "No yield data: 5%. ") + f"Tax drag for {cd.name}: "
                           f"{(cd.hh or {}).get('invest_tax_drag', 0):g} pp/yr (main tax-"
                           "advantaged route).")
-    cash_r = c2.number_input("Cash (emergency fund) %/yr", 0.0, 10.0, 2.0, 0.25)
-    infl = c1.number_input("Inflation %/yr", -2.0, 15.0, 2.0, 0.1,
-                           help=src(cd.inflation_hist, "{:.2f}") + " Default 2% (target).")
-    rwg_d = float(cd.real_wage_growth_hist.value) \
-        if cd.real_wage_growth_hist.value == cd.real_wage_growth_hist.value else 0.5
+    cash_d = round(float(D_["cash_return"]["value"]), 2)
+    cash_r = c2.number_input("Emergency fund %/yr", 0.0, 10.0, cash_d, 0.05,
+                             key=K("cash"), help=D_["cash_return"]["source"])
+    depr_d = round(float(D_["deposit_return"]["value"]), 2)
+    dep_r = c2.number_input("Bank deposits %/yr", 0.0, 10.0, depr_d, 0.05, key=K("depr"),
+                            disabled=hold == "Invest everything",
+                            help=D_["deposit_return"]["source"])
+    infl_d = float(R_.get("inflation_target", 2.0))
+    infl = c1.number_input("Inflation %/yr", -2.0, 15.0, infl_d, 0.1, key=K("infl"),
+                           help=src(cd.inflation_hist, "{:.2f}") +
+                           f" Default {infl_d:g}% (central-bank target).")
+    wt = cd.wage_trend
+    w_out = st.radio("Wage growth outlook", ["Official projection", "Recent 20-year trend"],
+                     horizontal=True, disabled=wt is None,
+                     help="Official projection: long-run productivity growth assumed by the EC "
+                          "Ageing Report / OBR / CBO / PBO (expert forecasts that include "
+                          "convergence of poorer countries). Trend: the last ~20 years of "
+                          "real average-wage growth continue"
+                          + (f" ({wt.value:.2f}%/yr, {wt.year})." if wt is not None else "."))
+    rwg_src = wt if (w_out != "Official projection" and wt is not None) else \
+        cd.real_wage_growth_hist
+    rwg_d = float(rwg_src.value) if rwg_src.value == rwg_src.value else 0.5
     rwg = c2.number_input("Real wage growth %/yr (economy-wide)", -3.0, 5.0, round(rwg_d, 2),
-                          0.05, key=K("rwg"), help=src(cd.real_wage_growth_hist, "{:.2f}"))
+                          0.05, key=K(f"rwg{w_out}"), help=src(rwg_src, "{:.2f}"))
     real = st.toggle("Show in today's money (real)", True)
     cur = st.radio("Currency", ["local", "USD", "intl$"], horizontal=True,
                    format_func={"local": f"Local ({cd.currency})", "USD": "USD",
@@ -333,11 +476,27 @@ def build_plan(iso3: str, override: bool) -> Plan:
     """Plan for iso3. `override` = use the sidebar's money inputs (primary country);
     comparison countries use their own data defaults for local prices."""
     jl = JobLoss(jl_who - 1, int(jl_age), int(jl_m)) if jl_on else None
+    # money amounts entered for the main country move to others at PPP
+    ppp_f = 1.0 if override else \
+        ds.country(iso3).lcu_per_intl.value / cd.lcu_per_intl.value
     p = Plan(
         country=iso3, earners=(Earner(int(a1), p1, g1, education=d1),
                                Earner(int(a2), p2, g2, education=d2)),
         education_pay=edu_pay,
-        horizon_age=int(horizon), retirement_age=int(retire),
+        horizon_age=int(horizon) if override and int(horizon) != horizon_d else None,
+        retirement_age=int(retire) if override and int(retire) != retire_d else None,
+        equity_share=None if hold == "Like typical households" else eq,
+        deposit_share=None if hold == "Like typical households" else float(dep),
+        deposit_return=dep_r if override and abs(dep_r - depr_d) > 1e-9 else None,
+        wage_outlook="trend" if w_out != "Official projection" else
+        "projection", home_outlook="trend" if h_out == "Recent trend (10 yrs)" else "incomes",
+        rate_outlook="market" if r_out == "Market outlook" else "history",
+        spend_down=spend_down, family_gift=float(gift) * ppp_f,
+        family_gift_age=int(gift_age) or None, inheritance=float(inh) * ppp_f,
+        inheritance_age=int(inh_age) if override and int(inh_age) != max(inh_d, int(a1))
+        else None, university_share=float(uni), university_years=int(uni_y),
+        child_wage_penalty=float(wpen), ltc_years=int(ltc_y),
+        ltc_cost=float(ltc_c) if override and abs(ltc_c - ltc_d) > 1e-9 else None,
         marriage_age=int(m_age) if married else None,
         child_ages=(None if k1 == "none" else int(k1), None if k2 == "none" else int(k2)),
         childcare_from=cc_from, childcare_to=cc_to,
@@ -345,14 +504,19 @@ def build_plan(iso3: str, override: bool) -> Plan:
         max_payment_to_income=None if rules else float(dsti),
         cars=int(cars) if override else None, unemployment_risk=urisk,
         primary_parent=0 if leave_who == "Partner 1" else 1, leave_scale=leave_scale,
-        private_health=priv_h, church_tax=church, student_loan=float(sloan) if override else 0.0,
+        private_health=priv_h, church_tax=church, student_loan=float(sloan) if override and abs(sloan - sl_typ) > 1e-9 else 0.0,
+        typical_student_debt=bool(sl_typ) and abs(sloan - sl_typ) < 1e-9,
+        student_loan_rate=float(sl_rate) if override and abs(sl_rate - slr_d) > 1e-9
+        else None, student_loan_years=int(sl_years) if int(sl_years) != 10 else None,
         budget_elasticity=elast, state=state if iso3 == "USA" else None,
         survey_correction=surv, child_penalty=work_mode == "Country typical",
         child_dependent_to=int(home_to) if override and int(home_to) != max(home_d, 18)
         else None,
         budget_scale=budget_scale, emergency_fund_months=efund, job_loss=jl,
-        return_nominal=ret, cash_return=cash_r,
-        inflation=None if abs(infl - 2.0) < 1e-9 else infl, us_citizens=us_cit,
+        return_nominal=ret if override and abs(ret - ret_d) > 1e-9 else None,
+        cash_return=cash_r if override and abs(cash_r - cash_d) > 1e-9 else None,
+        inflation=infl if override and abs(infl - infl_d) > 1e-9 else None,
+        us_citizens=us_cit,
         us_employer=us_emp, starting_savings=float(savings0) if override else
         float(savings0) / cd.lcu_per_intl.value * ds.country(iso3).lcu_per_intl.value)
     if override:
@@ -368,7 +532,7 @@ def build_plan(iso3: str, override: bool) -> Plan:
                         emerg, cd.emergency_expense_size.value),
                     real_wage_growth=ov(rwg, rwg_d, 2),
                     owner_cost_pct=ov(owner, owner_d, 2),
-                    home_real_appreciation=ov(appr, appr_d, 2),
+                    home_real_appreciation=appr if h_out == "Custom" else None,
                     mortgage_years=None if int(term) == term_d else int(term))
     return p
 
@@ -404,12 +568,23 @@ kc[1].metric("Spending now", f"{d0['expenses_recurring'] / 12:,.0f}/mo")
 kc[2].metric("Saving now", f"{d0['saving'] / 12:,.0f}/mo",
              f"{d0['saving_rate'] * 100:.0f}% of net")
 conv = {"local": 1.0, "USD": cd.lcu_per_usd.value, "intl$": cd.lcu_per_intl.value}[cur]
-pw = res.summary.get("pension_wealth_real", 0.0) / conv
-kc[3].metric(f"Net worth at {int(last['age1'])}", f"{last['net_worth']:,.0f}",
-             f"+ pension rights ≈ {pw:,.0f}", delta_color="off", delta_arrow="off",
-             help="Liquid savings + home equity. Pension rights: OECD net replacement rate "
-                  f"({res.summary.get('pension_nrr', 0):.0f}%, mandatory schemes) x final net "
-                  "pay x 15 (value of a pension from 67, today's money).")
+S_ = res.summary
+ra_ = S_.get("retirement_age", retire)
+r_row = disp[disp["age1"] == ra_]
+nw_ret = r_row["net_worth"].iloc[0] if not r_row.empty else last["net_worth"]
+pen_m = (S_.get("pension_income_real", 0.0) / conv / 12) if real else None
+kc[3].metric(f"Net worth at retirement ({ra_})", f"{nw_ret:,.0f}",
+             (f"pension {pen_m:,.0f}/mo" + (f" ({S_['pension_vs_last_net']:.0%} of last pay)"
+                                             if S_.get("pension_vs_last_net") else ""))
+             if pen_m else None, delta_color="off", delta_arrow="off",
+             help="Liquid savings + home equity + pension pots. Pension: both partners' "
+                  "career-average pay relative to the average wage x the OECD net "
+                  "replacement rate at that pay level (mandatory schemes, full career, "
+                  f"legislated rules; {S_.get('pension_nrr', 0):.0f}% at the average wage), "
+                  "today's money."
+                  + (f" Savings run out at {S_['savings_run_out_age']}."
+                     if S_.get("savings_run_out_age") else
+                     f" At {int(last['age1'])}: {last['net_worth']:,.0f}."))
 kc[4].metric("Avg tax rate now", f"{d0['local_tax_rate'] * 100:.0f}%",
              f"US residual {d0['us_tax'] / 12:,.0f}/mo" if us_cit and iso != "USA" else None,
              delta_color="off", delta_arrow="off")
@@ -441,6 +616,7 @@ with tabs[0]:
     exp_cols = [c for c in disp.columns if c.startswith(("budget:", "oneoff:")) or c in
                 ("rent", "mortgage_payment", "owner_costs", "children", "childcare",
                  "emergencies", "cars", "public_transport", "health", "mortgage_insurance",
+                 "university", "long_term_care",
                  "mortgage_interest_relief", "wealth_tax", "student_loan")]
     grp = pd.DataFrame({"age": disp["age1"]})
     for c in exp_cols:
@@ -476,8 +652,10 @@ with tabs[0]:
 # ---------------------------------------------------------------- savings
 with tabs[1]:
     fig = go.Figure()
-    fig.add_bar(x=disp["age1"], y=disp["liquid"], name="Liquid savings",
-                marker_color=PALETTE[0], hovertemplate="Liquid: %{y:,.0f}<extra></extra>")
+    fig.add_bar(x=disp["age1"], y=disp["cash"], name="Bank (emergency fund + deposits)",
+                marker_color=PALETTE[3], hovertemplate="Bank: %{y:,.0f}<extra></extra>")
+    fig.add_bar(x=disp["age1"], y=disp["invest"], name="Investments",
+                marker_color=PALETTE[0], hovertemplate="Investments: %{y:,.0f}<extra></extra>")
     if disp["home_equity"].abs().sum() > 0:
         fig.add_bar(x=disp["age1"], y=disp["home_equity"], name="Home equity",
                     marker_color=PALETTE[1],
@@ -493,8 +671,14 @@ with tabs[1]:
     add_event_markers(fig, res.events)
     st.plotly_chart(base_layout(fig, "Cumulative savings and net worth", money_note),
                     width="stretch")
-    st.caption(f"Emergency fund ({efund:g} months of spending) is kept in cash at {cash_r}%; "
-               f"the rest is invested at {ret}% nominal. Home equity = home value − mortgage. "
+    st.caption(f"Emergency fund ({efund:g} months of spending) is kept in cash at "
+               f"{res.inputs['cash_return']['value']:g}%; of the rest "
+               f"{res.inputs['deposit_share']['value']:.0f}% stays in bank deposits at "
+               f"{res.inputs['deposit_return']['value']:g}% and the remainder is invested "
+               f"({res.inputs['equity_share']['value']:.0f}% in shares) at "
+               f"{res.inputs['return_nominal']['value']:g}% nominal, rebalanced yearly. "
+               "Home equity = home value − "
+               "mortgage. Pension pots become spendable at retirement. "
                "Employer pension contributions (UK auto-enrolment is in the state pension "
                "figure instead; US 401(k), Canada) build a retirement account that can't be "
                "used for a deposit.")
@@ -522,6 +706,10 @@ with tabs[2]:
         fig.add_scatter(x=disp["age1"], y=disp[col] / 12, name=nm, mode="lines",
                         line=dict(color=c, width=2, dash=dash),
                         hovertemplate=nm + ": %{y:,.0f}<extra></extra>")
+    if disp["pension_income"].abs().sum() > 0:
+        fig.add_scatter(x=disp["age1"], y=disp["pension_income"] / 12, name="Pensions (net)",
+                        mode="lines", line=dict(color=PALETTE[2], width=2.5),
+                        hovertemplate="Pensions: %{y:,.0f}<extra></extra>")
     fig.add_scatter(x=disp["age1"], y=disp["gross"] / 12, name="Household gross", mode="lines",
                     line=dict(color="#0b0b0b", width=2, dash="dot"),
                     hovertemplate="Household gross: %{y:,.0f}<extra></extra>")
@@ -594,7 +782,11 @@ with tabs[4]:
         rows.append({"country": n, "net income /mo": f["net_income"] / 12,
                      "spending /mo": f["expenses_recurring"] / 12, "saving /mo": f["saving"] / 12,
                      "saving rate": f["saving_rate"], "avg tax rate": f["local_tax_rate"],
-                     f"net worth at {horizon}": d["net_worth"].iloc[-1],
+                     "retires at": r.summary.get("retirement_age"),
+                     "net worth at retirement": float(d.loc[d["age1"] == r.summary.get(
+                         "retirement_age"), "net_worth"].iloc[0]) if (d["age1"] == r.summary.get(
+                             "retirement_age")).any() else float("nan"),
+                     f"net worth at end ({int(d['age1'].iloc[-1])})": d["net_worth"].iloc[-1],
                      "US residual (lifetime)": d["us_tax"].sum(),
                      "house bought at": next((e["age"] for e in r.events
                                               if e["event"] == "House purchase"), "—"),
@@ -620,7 +812,7 @@ with tabs[4]:
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
                  column_config={k: st.column_config.NumberColumn(format="%.0f") for k in
                                 ("net income /mo", "spending /mo", "saving /mo",
-                                 f"net worth at {horizon}", "US residual (lifetime)")} |
+                                 "net worth at retirement", "US residual (lifetime)")} |
                  {k: st.column_config.NumberColumn(format="percent") for k in
                   ("saving rate", "avg tax rate")})
 

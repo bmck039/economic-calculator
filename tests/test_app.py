@@ -66,3 +66,28 @@ def test_app_degrees(country):
         assert m["Functional unemployment"] not in ("—", None)
     _w(at, "checkbox", "Pay follows the degree").set_value(False).run()
     assert not at.exception, at.exception
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+@pytest.mark.parametrize("country", ["Germany", "United States", "Iceland"])
+def test_app_outlook_and_life_factors(country):
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    at.sidebar.selectbox[0].set_value(country).run()
+    _w(at, "radio", "House prices & rents").set_value("Recent trend (10 yrs)").run()
+    _w(at, "radio", "After the fixed period").set_value("20-year average").run()
+    _w(at, "number_input", "Gift from family").set_value(30000.0).run()
+    _w(at, "number_input", "Inheritance (").set_value(100000.0).run()
+    _w(at, "slider", "Parents pay this share").set_value(50).run()
+    _w(at, "slider", "Main parent's lasting pay").set_value(7).run()
+    _w(at, "number_input", "Years of paid long-term care").set_value(3).run()
+    _w(at, "radio", "In retirement we spend").set_value("Only the pension").run()
+    _w(at, "radio", "How we hold our savings").set_value("Custom").run()
+    _w(at, "slider", "% kept in bank deposits").set_value(30).run()
+    _w(at, "slider", "% of investments in shares").set_value(80).run()
+    _w(at, "number_input", "Student debt at the start").set_value(40000.0).run()
+    _w(at, "number_input", "Interest %/yr").set_value(5.0).run()
+    _w(at, "number_input", "Repaid over").set_value(20).run()
+    _w(at, "radio", "How we hold our savings").set_value("Invest everything").run()
+    assert not at.exception, at.exception
+    assert any(m.label.startswith("Net worth at retirement") for m in at.metric)

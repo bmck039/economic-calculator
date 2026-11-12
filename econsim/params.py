@@ -107,3 +107,16 @@ def parse_rate_brackets(s: str) -> list[tuple[float, float]]:
             r, t = part.split(":")
             out.append((float(r) / 100, float(t)))
     return sorted(out, key=lambda x: x[1])
+
+
+@lru_cache(maxsize=1)
+def _student_debt() -> pd.DataFrame:
+    return pd.read_csv(DIR / "student_debt.csv")
+
+
+def student_debt(iso3: str) -> dict[str, dict]:
+    """Typical student debt at graduation by degree, for those who borrow (local money,
+    in the stated year's prices). Only where borrowing is the norm and a national figure
+    exists; elsewhere tuition is low and debt mostly small or absent."""
+    d = _student_debt()
+    return {r["education"]: r for r in d[d["iso3"] == iso3].to_dict("records")}

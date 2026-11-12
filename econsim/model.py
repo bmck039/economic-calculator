@@ -127,6 +127,19 @@ class CountryData:
     leave_home_age: Optional[Sourced] = None          # children stop being dependants
     # survey under-recording: budget category -> national accounts / HBS ratio (>= 1)
     budget_coverage: dict = field(default_factory=dict)
+    # ---- the years ahead (forward-looking) ------------------------------------------
+    retirement_age: Optional[Sourced] = None          # normal age for today's entrants
+    le65: dict = field(default_factory=dict)          # (sex, year) -> age reached at 65
+    pension_nrr: dict = field(default_factory=dict)   # x average wage -> net repl. %
+    pension_src: Optional[Sourced] = None
+    rates: dict = field(default_factory=dict)         # rates.csv row (10y yield, ...)
+    university_cost: Optional[Sourced] = None         # household pays per student-year
+    student_debt: dict = field(default_factory=dict)  # education -> Sourced (borrowers)
+    wage_trend: Optional[Sourced] = None              # real avg-wage growth, ~20 years
+    home_trend: Optional[Sourced] = None              # real house-price growth, ~20 years
+    rent_trend: Optional[Sourced] = None              # real rent growth, ~20 years
+    portfolio: dict = field(default_factory=dict)     # portfolio.csv row: deposit_share,
+    #                                                   equity_share, overnight_share
 
 
 @dataclass
@@ -150,8 +163,10 @@ class Plan:
     country: str
     earners: tuple[Earner, Earner]
     start_year: int = 2026
-    horizon_age: int = 67            # partner-1 age at which the simulation ends
-    retirement_age: int = 67         # earnings stop (both partners, own age)
+    horizon_age: Optional[int] = None   # partner-1 age at which the simulation ends; None
+    #                                  -> the longer-living partner's projected lifespan
+    retirement_age: Optional[int] = None  # earnings stop, pension starts (own age); None ->
+    #                                  the country's normal age for today's entrants
     marriage_age: Optional[int] = 30
     wedding_cost: Optional[float] = None          # None -> data default
     child_ages: tuple[Optional[int], Optional[int]] = (32, 34)   # partner-1 age at birth
@@ -176,12 +191,51 @@ class Plan:
     emergency_annual_cost: Optional[float] = None  # None -> 1 unexpected expense / yr
     emergency_fund_months: float = 6.0
     job_loss: Optional[JobLoss] = None
-    return_nominal: float = 5.0      # % per year on invested savings, after fees, BEFORE tax
-    #                                  (the country's tax drag is subtracted)
-    cash_return: float = 2.0         # % per year on the emergency fund
+    return_nominal: Optional[float] = None  # % per year on invested savings, after fees,
+    #                                  BEFORE tax (the country's tax drag is subtracted);
+    #                                  None -> today's 10-year yield + equity_share x
+    #                                  equity_premium - fund_fees
+    equity_share: Optional[float] = None  # share of invested savings in shares (rest:
+    #                                  bonds); None -> the country's households (OECD)
+    deposit_share: Optional[float] = None  # % of savings above the emergency fund kept in
+    #                                  bank deposits; None -> the country's households
+    #                                  (OECD balance sheets); 0 = invest everything
+    deposit_return: Optional[float] = None  # % per year on those deposits; None -> what
+    #                                  banks pay households now (ECB / FDIC)
+    equity_premium: float = 3.5      # expected return of shares over 10-year govt bonds
+    fund_fees: float = 0.2           # % per year (index funds)
+    glide_path: bool = True          # shares fall to half of equity_share by retirement
+    cash_return: Optional[float] = None  # % per year on the emergency fund; None -> the
+    #                                  overnight-deposit rate banks pay households now
     debt_rate: float = 9.0           # % per year if savings go negative
     inflation: Optional[float] = None             # None -> 2.0
-    real_wage_growth: Optional[float] = None      # None -> min(hist, 1.0), floor 0
+    real_wage_growth: Optional[float] = None      # None -> see wage_outlook
+    # ---- outlook: how today's conditions carry forward ---------------------------------
+    wage_outlook: str = "projection"  # "projection" (official long-run productivity
+    #                                  projections) | "trend" (last ~20 years continue)
+    home_outlook: str = "incomes"    # "incomes" (prices and rents keep pace with wages) |
+    #                                  "trend" (last ~20 years' real trend for 10 years,
+    #                                  then with incomes)
+    rate_outlook: str = "market"     # rate a fixed mortgage resets to: "market" (today's
+    #                                  10-year yield + usual mortgage spread) | "history"
+    #                                  (20-year average mortgage rate)
+    spend_down: bool = True          # True: retirees spend pension + savings / years left;
+    #                                  False: only the pension (savings left to heirs)
+    # ---- optional life factors (off by default) ----------------------------------------
+    family_gift: float = 0.0         # help from family (today's money), e.g. a deposit
+    family_gift_age: Optional[int] = None   # P1 age; None -> the planned buying age
+    inheritance: float = 0.0         # after inheritance tax (today's money)
+    inheritance_age: Optional[int] = None   # P1 age; None -> when the parents (30 years
+    #                                  older) reach today's life expectancy at 65
+    university_share: float = 0.0    # % of each child's university costs the parents pay
+    university_years: int = 4
+    university_from: int = 18        # child age at the start
+    typical_student_debt: bool = False  # start with the country's typical debt for each
+    #                                  partner's degree (borrowers' average; aged <= 30)
+    child_wage_penalty: float = 0.0  # % lasting cut in the main parent's hourly pay after
+    #                                  the first child (Kleven et al.: ~1/3 of a ~20% gap)
+    ltc_years: int = 0               # years of paid long-term care for one partner at the end
+    ltc_cost: Optional[float] = None  # per year, today's money; None -> country default
     us_citizens: bool = True
     us_employer: bool = False        # True -> US FICA where no totalization agreement
     starting_savings: float = 0.0
@@ -193,6 +247,9 @@ class Plan:
     private_health: bool = False     # optional private cover (e.g. Ireland)
     church_tax: bool = False         # Germany: 8-9% of income tax for church members
     student_loan: float = 0.0        # balance at the start (local currency, per household)
+    student_loan_rate: Optional[float] = None  # %/yr; None -> the country's main scheme
+    student_loan_years: Optional[int] = None   # repayment term; None -> the scheme's
+    #                                  (US standard plan 10; UK: 9% above the threshold)
     budget_elasticity: float = 0.8   # spending rises with income^elasticity relative to the
     #                                  survey couple (calibrated on Eurostat saving by age)
     survey_correction: float = 0.0   # share (exponent) of the national-accounts gap in

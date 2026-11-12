@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import re
 from functools import lru_cache
+from typing import Optional
 from pathlib import Path
 
 import pandas as pd
@@ -55,6 +56,9 @@ class DataStore:
         self.market = rd("market_index")
         self.states_api = rd("us_states")
         self.mort_lr = rd("mortgage_longrun")
+        self.rates = rd("rates")
+        self.university = rd("university")
+        self.portfolio = rd("portfolio")
         if not self.snap.empty:
             COUNTRY_NAMES.update(dict(zip(self.snap["iso3"], self.snap["country"])))
 
@@ -244,6 +248,7 @@ class DataStore:
         upd.update(self._labour(iso3))
         upd.update(self._family(iso3))
         hh = self._pension(iso3, hh)
+        upd.update(self._ahead(iso3, cd))
         if hh and hh.get("fuel_price") == hh.get("fuel_price"):
             fp = self._index_level(iso3, "fuel", Sourced(float(hh["fuel_price"]), "", "", "2025"))
             if fp is not None and str(fp.year) != "2025":
@@ -347,23 +352,134 @@ class DataStore:
                                       C[C["iso3"] == iso3].itertuples()}
         return out
 
+    def _pension_rows(self, iso3: str) -> pd.DataFrame:
+        P_ = self.pensions
+        if P_.empty or "item" not in P_:
+            return pd.DataFrame()
+        return P_[P_["iso3"] == ("CHE" if iso3 == "LIE" else iso3)]
+
     def _pension(self, iso3: str, hh: dict) -> dict:
         """OECD Pensions at a Glance net replacement rate (mandatory) replaces the curated
         value. Its UK figure counts auto-enrolment as mandatory, so the UK employer match
         (auto-enrolment) is not added to savings as well."""
-        P_ = self.pensions
-        if P_.empty or not hh:
-            return hh
-        r = P_[(P_["iso3"] == ("CHE" if iso3 == "LIE" else iso3)) &
-               (P_["category"] == "mandatory")]
-        if r.empty:
+        r = self._pension_rows(iso3)
+        r = r[r["item"] == "nrr100"] if not r.empty else r
+        if r.empty or not hh:
             return hh
         hh = dict(hh)
-        hh["pension_nrr"] = float(r["net_replacement_rate"].iloc[0])
+        hh["pension_nrr"] = float(r["value"].iloc[0])
         hh["pension_nrr_source"] = f"OECD Pensions at a Glance ({int(r['year'].iloc[0])})"
         if iso3 == "GBR":
             hh["employer_match_pct"] = 0.0
         return hh
+
+    def _ahead(self, iso3: str, cd: CountryData) -> dict:
+        """Forward-looking inputs: retirement age for today's entrants, projected life
+        expectancy, replacement rates by earnings level, market interest rates, university
+        costs, typical student debt and recent real price trends."""
+        out: dict = {}
+        src_iso = "CHE" if iso3 == "LIE" else iso3
+        pr = self._pension_rows(iso3)
+        if not pr.empty:
+            it = pr.set_index("item")
+            if "retirement_age" in it.index:
+                x = it.loc["retirement_age"]
+                now = it.loc["retirement_age_now", "value"] if "retirement_age_now" in \
+                    it.index else None
+                out["retirement_age"] = Sourced(
+                    float(x["value"]), "age", "OECD Pensions at a Glance: normal retirement "
+                    "age for someone who entered the labour market at 22 in "
+                    f"{int(x['year'])}", int(x["year"]), False, "A",
+                    (f"today's retirees: {now:g}; " if now is not None else "")
+                    + "legislated increases (incl. links to life expectancy) applied; men "
+                    "and women averaged" + ("; Swiss rules used" if iso3 == "LIE" else ""))
+            le = {}
+            for item, v in it["value"].items():
+                if str(item).startswith("le65_"):
+                    _, sex, tag = str(item).split("_")
+                    yr = int(it.loc[item, "year"])
+                    le[(sex, yr)] = float(v)
+            out["le65"] = le
+            nrr = {lvl: float(it.loc[k, "value"]) for lvl, k in
+                   ((0.5, "nrr50"), (1.0, "nrr100"), (2.0, "nrr200")) if k in it.index}
+            if nrr:
+                yr = int(it.loc["nrr100", "year"]) if "nrr100" in it.index else None
+                out["pension_nrr"] = nrr
+                out["pension_src"] = Sourced(
+                    nrr.get(1.0, float("nan")), "% of net earnings",
+                    "OECD Pensions at a Glance: net replacement rate, mandatory schemes, "
+                    "full career from 22 under legislated rules", yr, False, "A",
+                    " / ".join(f"{k:g}x AW {v:.0f}%" for k, v in sorted(nrr.items())))
+        if not self.rates.empty:
+            r = self.rates[self.rates["iso3"] == iso3]
+            if not r.empty:
+                out["rates"] = {k: v for k, v in r.iloc[0].to_dict().items() if not _nan(v)}
+        if not self.university.empty:
+            u = self.university[self.university["iso3"] == src_iso]
+            if not u.empty:
+                u = u.iloc[0]
+                out["university_cost"] = Sourced(
+                    float(u["per_student_year"]), f"{cd.currency}/year",
+                    "OECD Education at a Glance: " + ("household" if u["basis"] ==
+                                                     "households" else "private (households"
+                                                     " + firms)") + " payments to tertiary "
+                    "institutions per full-time student", int(u["year"]),
+                    bool(u["estimated"]), "B", "average over all students incl. those "
+                    "paying nothing; living costs are separate (children at home)")
+        out["student_debt"] = {
+            e: Sourced(float(v["amount"]), cd.currency, str(v["source"]), int(v["year"]),
+                       False, "B", str(v.get("note", "")))
+            for e, v in P.student_debt(iso3).items()}
+        if not self.portfolio.empty:
+            pf = self.portfolio[self.portfolio["iso3"] == iso3]
+            if not pf.empty:
+                out["portfolio"] = {k: v for k, v in pf.iloc[0].to_dict().items()
+                                    if not _nan(v)}
+        out["wage_trend"] = self._trend_wage(iso3)
+        out["home_trend"] = self._trend_index(iso3, "home_price", cd)
+        out["rent_trend"] = self._trend_index(iso3, "rent", cd)
+        return out
+
+    def _trend_wage(self, iso3: str, years: int = 20) -> Optional[Sourced]:
+        r = self.rwh[(self.rwh["iso3"] == iso3) & (self.rwh["measure"] == "avg_wage")] \
+            if not self.rwh.empty else self.rwh
+        if r.empty:
+            return None
+        src = "OECD average wages" if (r["source"] == "OECD average wages").any() else \
+            r["source"].iloc[0]
+        s = r[r["source"] == src].groupby("year")["real_local"].mean().dropna()
+        s = s[s.index >= s.index.max() - years]
+        if len(s) < 10:
+            return None
+        n = s.index.max() - s.index.min()
+        g = ((s.iloc[-1] / s.iloc[0]) ** (1 / n) - 1) * 100
+        return Sourced(round(float(g), 2), "%/yr", f"{src} (real, CPI-deflated)",
+                       f"{int(s.index.min())}-{int(s.index.max())}", False, "A",
+                       f"average real growth of the mean wage over {n} years")
+
+    def _trend_index(self, iso3: str, index: str, cd: CountryData,
+                     years: int = 20) -> Optional[Sourced]:
+        m = self.market
+        if m.empty or not cd.cpi:
+            return None
+        m = m[(m["iso3"] == ("CHE" if iso3 == "LIE" else iso3)) & (m["index"] == index)]
+        last_full = max(cd.cpi)
+        m = m[(m["year"] <= last_full)]
+        if m.empty:
+            return None
+        # one source: the one covering the most of the window
+        src = m.groupby("source")["year"].count().idxmax()
+        s = m[m["source"] == src].set_index("year")["value"].sort_index()
+        s = s[s.index >= last_full - years]
+        s = s[[y in cd.cpi for y in s.index]]
+        if len(s) < 10:
+            return None
+        real = s / pd.Series({y: cd.cpi[y] for y in s.index})
+        n = int(real.index.max() - real.index.min())
+        g = ((real.iloc[-1] / real.iloc[0]) ** (1 / n) - 1) * 100
+        return Sourced(round(float(g), 2), "%/yr", f"{src} (real, CPI-deflated)",
+                       f"{int(real.index.min())}-{int(real.index.max())}", False, "A",
+                       f"average real growth over {n} years")
 
     def _labour(self, iso3: str) -> dict:
         out: dict = {"labour": {}, "edu_pay": {}, "edu_pay_src": None}

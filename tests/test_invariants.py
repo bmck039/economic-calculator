@@ -45,14 +45,20 @@ def test_no_nan_inf_or_negative_costs(ds):
         assert (y[costs] >= -1e-6).all().all(), (iso, y[costs].min()[y[costs].min() < 0])
         assert (y["income_tax_local"] >= -1e-6).all() or iso == "USA", iso
         assert (y["net_income"] <= y["gross"] + y["child_benefits"] + y["leave_benefits"]
+                + y["pension_income"] + y["old_age_assistance"]
                 + 1e-6).all(), iso
 
 
 def test_more_rent_less_wealth_and_more_pay_more_wealth(ds):
     for iso in isos(ds):
         cd = ds.country(iso)
-        nw = lambda p, c=cd: run(ds, p, c).years["net_worth"].iloc[-1]  # noqa: E731
-        p = base(iso, buy_house_age=None)
+        def nw(p, c=cd):
+            """Net worth in the last working year, plus the old-age assistance needed
+            later (two renters who both run out end at 0 whatever their rent)."""
+            y = run(ds, p, c).years
+            return y.loc[~y["retired"].astype(bool), "net_worth"].iloc[-1] - \
+                y["old_age_assistance"].sum()
+        p = base(iso, buy_house_age=None, horizon_age=None)
         hi_rent = replace(p, rent=cd.rent.value * 1.3)
         assert nw(hi_rent) < nw(p), iso
         if "p75" in cd.earnings:
@@ -88,3 +94,21 @@ def test_saving_rate_does_not_trend_with_economic_growth_alone(ds):
                          ds.us_params()).years
             s[g] = y["saving_rate"].iloc[-1] - y["saving_rate"].iloc[1]
         assert abs(s[2.0] - s[0.0]) < 0.03, (iso, s)
+
+
+def test_pension_only_keeps_savings_and_households_hold_deposits(ds):
+    for iso in ("DEU", "USA", "POL"):
+        cd = ds.country(iso)
+        p = base(iso, horizon_age=None)
+        down, keep = run(ds, p, cd), run(ds, replace(p, spend_down=False), cd)
+        old = down.years["retired"].astype(bool)
+        assert keep.years["net_worth"].iloc[-1] > down.years["net_worth"].iloc[-1], iso
+        assert keep.years.loc[old, "expenses_recurring"].sum() < \
+            down.years.loc[old, "expenses_recurring"].sum(), iso
+        # households' own mix: some savings stay in the bank at (low) deposit rates
+        inp = down.inputs
+        assert 5 < inp["deposit_share"]["value"] < 95, iso
+        assert inp["deposit_return"]["value"] < inp["return_nominal"]["value"], iso
+        all_in = run(ds, replace(p, deposit_share=0.0,
+                                 equity_share=inp["equity_share"]["value"] / 100), cd)
+        assert all_in.years["net_worth"].iloc[-1] > down.years["net_worth"].iloc[-1], iso

@@ -106,6 +106,7 @@ import logging
 import math
 import os
 import re
+import statistics
 import sys
 import time
 import zipfile
@@ -174,7 +175,12 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #      US CPI 2025 gap fill, current-year unemployment from monthly data.
 #   6: family (child penalty, leaving-home age), budget_coverage (HBS vs national
 #      accounts), pensions (OECD replacement rates); us_states from the ACS/BEA APIs.
-DATA_VERSION = "6"
+#   7: pensions gains replacement rates at 0.5x/2x the average wage, future retirement
+#      ages and projected life expectancy; rates (10-year yields, short rates, mortgage
+#      spreads) for the retirement phase and forward-looking rates and returns.
+#   8: rates gains what banks pay households on deposits (ECB, FDIC); portfolio (how
+#      households split financial savings between deposits, bonds and shares: OECD).
+DATA_VERSION = "8"
 
 # ==========================================================================
 # Comparability notes
@@ -2944,25 +2950,182 @@ def hbs_coverage_eu(f: CachedFetcher, since: int | None) -> pd.DataFrame:
 PRR_DIMS = ["REF_AREA", "FREQ", "MEASURE", "UNIT_MEASURE", "SEX", "AGE", "OPTIONALITY"]
 
 
+NPRR_STAT = {"NPRR100": "net_rate_average_earner", "NPRR50": "net_rate_half_average",
+             "NPRR200": "net_rate_double_average"}
+
+
 def pensions_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
-    """OECD Pensions at a Glance: net pension replacement rate of an average earner
-    (mandatory schemes; mandatory + voluntary where voluntary plans are widespread)."""
+    """OECD Pensions at a Glance: net pension replacement rates at 50%, 100% and 200% of
+    the average wage (mandatory schemes; mandatory + voluntary where voluntary plans are
+    widespread). These are PROSPECTIVE: a person entering the labour market at 22 in the
+    reference year, under the rules already legislated for their whole career."""
     df = oecd(f, "OECD.ELS.SPD,DSD_PAG@DF_PRR", PRR_DIMS,
-              {"REF_AREA": [c for c in COUNTRIES if c != "LIE"], "MEASURE": ["NPRR100"]},
-              None)
+              {"REF_AREA": [c for c in COUNTRIES if c != "LIE"],
+               "MEASURE": list(NPRR_STAT)}, None)
     df["OBS_VALUE"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
-    g = df.groupby(["REF_AREA", "TIME_PERIOD", "OPTIONALITY"], as_index=False)["OBS_VALUE"] \
-        .mean()   # average of men and women
+    g = df.groupby(["REF_AREA", "TIME_PERIOD", "OPTIONALITY", "MEASURE"],
+                   as_index=False)["OBS_VALUE"].mean()   # average of men and women
     out = pd.DataFrame({"iso3": g["REF_AREA"], "period": g["TIME_PERIOD"],
-                        "value": g["OBS_VALUE"],
+                        "value": g["OBS_VALUE"], "statistic": g["MEASURE"].map(NPRR_STAT),
                         "category": g["OPTIONALITY"].map({"M": "mandatory",
                                                           "MV": "mandatory_voluntary"}),
-                        "series": "DF_PRR NPRR100"})
-    return frame(out, measure="pension_replacement", statistic="net_rate_average_earner",
+                        "series": "DF_PRR " + g["MEASURE"]})
+    return frame(out, measure="pension_replacement",
                  unit="% of net pre-retirement earnings", frequency="A",
                  source="OECD Pensions at a Glance",
-                 comparability_note="Net replacement rate, full career from age 22, average "
-                 "earner; men and women averaged.")
+                 comparability_note="Net replacement rate, full career from age 22 under "
+                 "legislated rules; men and women averaged.")
+
+
+def retirement_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """OECD Pensions at a Glance: the normal retirement age for someone who entered the
+    labour market at 22 in the reference year (legislated increases, including links to
+    life expectancy, applied), today's normal age, and life expectancy at 65 now and as
+    projected for 2065 (UN World Population Prospects)."""
+    df = oecd(f, "OECD.ELS.SPD,DSD_PAG@DF_PAG", PRR_DIMS,
+              {"REF_AREA": [c for c in COUNTRIES if c != "LIE"],
+               "MEASURE": ["FRPLF22", "CRPLF22", "LE"]}, None)
+    df = df[(df["MEASURE"] != "LE") | (df["AGE"] == "Y65")]
+    stat = {"FRPLF22": "normal_age_future_entrant", "CRPLF22": "normal_age_current",
+            "LE": "life_expectancy_at_65"}
+    out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
+                        "value": df["OBS_VALUE"], "statistic": df["MEASURE"].map(stat),
+                        "category": df["SEX"].map({"M": "male", "F": "female"}),
+                        "series": "DF_PAG " + df["MEASURE"]})
+    return frame(out, measure="retirement", unit="age (years)", frequency="A",
+                 source="OECD Pensions at a Glance",
+                 comparability_note="Retirement ages for a labour-market entrant at 22; "
+                 "life expectancy at 65 expressed as the age reached (65 + years left).")
+
+
+EAG_FIN_DIMS = ["REF_AREA", "MEASURE", "EDUCATION_LEV", "EXP_SOURCE", "EXP_DESTINATION",
+                "EXPENDITURE_TYPE", "PRICE_BASE", "UNIT_MEASURE", "Q_SHEET"]
+
+
+def university_cost_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """OECD Education at a Glance (UOE finance): what households pay to tertiary
+    institutions per full-time-equivalent student (tuition and fees net of grants paid to
+    the institution, incl. fees financed by student loans), national currency. Where the
+    household share is not reported, all private non-educational sources (households and
+    firms) are used and flagged."""
+    df = oecd(f, "OECD.EDU.IMEP,DSD_EAG_UOE_FIN@DF_UOE_FIN_INDIC_SOURCE_NATURE", EAG_FIN_DIMS,
+              {"REF_AREA": [c for c in COUNTRIES if c != "LIE"], "MEASURE": ["FIN_PERSTUD"],
+               "EDUCATION_LEV": ["ISCED11_5T8"], "EXP_SOURCE": ["S14", "S1D_NON_EDU"],
+               "EXP_DESTINATION": ["INST_EDU"], "EXPENDITURE_TYPE": ["DIR_EXP"],
+               "PRICE_BASE": ["V"], "UNIT_MEASURE": ["XDC_ST"]}, max(since or 2015, 2015))
+    out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
+                        "value": df["OBS_VALUE"],
+                        "statistic": df["EXP_SOURCE"].map({"S14": "households",
+                                                           "S1D_NON_EDU": "all_private"}),
+                        "series": "EAG UOE_FIN FIN_PERSTUD"})
+    return frame(out, measure="tertiary_private_cost", unit="national currency per FTE student",
+                 frequency="A", source="OECD Education at a Glance",
+                 comparability_note="Payments to tertiary institutions per FTE student; an "
+                 "average over all students, including those paying nothing.")
+
+
+# euro members in 2026 (Bulgaria joined on 1 January 2026): short rate = euro area
+EURO_MEMBERS = {"AUT", "BEL", "BGR", "HRV", "CYP", "EST", "FIN", "FRA", "DEU", "GRC", "IRL",
+                "ITA", "LVA", "LTU", "LUX", "MLT", "NLD", "PRT", "SVK", "SVN", "ESP"}
+STES_DIMS = ["REF_AREA", "FREQ", "MEASURE", "UNIT_MEASURE", "ACTIVITY", "ADJUSTMENT",
+             "TRANSFORMATION", "TIME_HORIZ", "METHODOLOGY"]
+
+
+def interest_rates_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """OECD financial-market statistics: 10-year government bond yields (IRLT) and
+    3-month interbank rates (IR3TIB), monthly, for the non-EU countries."""
+    areas = [c for c in COUNTRIES if COUNTRIES[c][3] != "EU" and c != "LIE"]
+    df = oecd(f, "OECD.SDD.STES,DSD_STES@DF_FINMARK", STES_DIMS,
+              {"REF_AREA": areas, "FREQ": ["M"], "MEASURE": ["IRLT", "IR3TIB"]},
+              max(since or 2000, 2000))
+    stat = {"IRLT": "govt_bond_10y", "IR3TIB": "interbank_3m"}
+    out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
+                        "value": df["OBS_VALUE"], "statistic": df["MEASURE"].map(stat),
+                        "series": "STES " + df["MEASURE"]})
+    return frame(out, measure="interest_rate", unit="% p.a.", frequency="M",
+                 source="OECD financial market statistics")
+
+
+def interest_rates_eu(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Eurostat: EMU convergence-criterion 10-year bond yields (all EU members) and 3-month
+    money-market rates (euro area as one, plus the non-euro members)."""
+    s0 = max(since or 2000, 2000)
+    lt = eurostat(f, "irt_lt_mcby_m", required={"int_rt": ["MCBY"]}, since=s0,
+                  geo=[COUNTRIES[c][1] for c in COUNTRIES if COUNTRIES[c][3] == "EU"])
+    lt = lt.assign(statistic="govt_bond_10y", series="irt_lt_mcby_m")
+    geos = [COUNTRIES[c][1] for c in COUNTRIES
+            if COUNTRIES[c][3] == "EU" and c not in EURO_MEMBERS]
+    own = eurostat(f, "irt_st_m", required={"int_rt": ["IRT_M3"]}, since=s0, geo=geos)
+    # the euro-area aggregate has no ISO3 code, so eurostat() would drop it: fetch it raw
+    ea = parse_jsonstat(f.get(EUROSTAT_API + "irt_st_m",
+                              [("format", "JSON"), ("lang", "EN"), ("int_rt", "IRT_M3"),
+                               ("geo", "EA"), ("sinceTimePeriod", str(s0))],
+                              label="eurostat:irt_st_m:EA", validate=is_json))
+    st_ = pd.concat([own] + [ea.assign(iso3=c) for c in sorted(EURO_MEMBERS)],
+                    ignore_index=True).assign(statistic="interbank_3m", series="irt_st_m")
+    d = pd.concat([lt, st_], ignore_index=True)
+    out = pd.DataFrame({"iso3": d["iso3"], "period": d["time"].astype(str), "value": d["value"],
+                        "statistic": d["statistic"], "series": d["series"]})
+    return frame(out, measure="interest_rate", unit="% p.a.", frequency="M",
+                 source="Eurostat (ECB) interest rates")
+
+
+def deposit_rates_ecb(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """What banks actually pay households: ECB MFI interest rates on overnight deposits
+    (new business = the current rate) and on deposits with an agreed maturity
+    (outstanding amounts), euro-area members."""
+    cc = "+".join(COUNTRIES[c][0] for c in sorted(EURO_MEMBERS))
+    params = {"format": "csvdata", "startPeriod": f"{max(since or 2015, 2015)}-01"}
+    parts = []
+    for item, cov, stat in (("L21", "N", "deposit_overnight"), ("L22", "O", "deposit_term")):
+        key = f"M.{cc}.B.{item}.A.R.A.2250.EUR.{cov}"
+        d = pd.read_csv(io.BytesIO(f.get(ECB_API + key, params, label=f"ecb:MIR:{stat}")),
+                        dtype=str)
+        parts.append(pd.DataFrame({"iso3": d["REF_AREA"].map(ISO2_TO_ISO3),
+                                   "period": d["TIME_PERIOD"], "value": d["OBS_VALUE"],
+                                   "statistic": stat, "series": "MIR:" + d["KEY"]}))
+    out = pd.concat(parts, ignore_index=True).dropna(subset=["iso3"])
+    return frame(out, measure="interest_rate", unit="% p.a.", frequency="M",
+                 source="ECB MFI interest rates (households)")
+
+
+def deposit_rates_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """FDIC national rates (via FRED): savings accounts and 12-month CDs."""
+    parts = []
+    for sid, stat in (("SNDR", "deposit_overnight"), ("NDR12MCD", "deposit_term")):
+        d = fred(f, sid)
+        parts.append(pd.DataFrame({"iso3": "USA", "period": d["date"].str[:7],
+                                   "value": d["value"], "statistic": stat,
+                                   "series": f"FRED {sid}"}))
+    return frame(pd.concat(parts, ignore_index=True), measure="interest_rate",
+                 unit="% p.a.", frequency="M", source="FDIC national deposit rates (FRED)")
+
+
+T720_DIMS = ["FREQ", "ADJUSTMENT", "REF_AREA", "COUNTERPART_AREA", "SECTOR",
+             "COUNTERPART_SECTOR", "CONSOLIDATION", "ACCOUNTING_ENTRY", "TRANSACTION",
+             "INSTR_ASSET", "MATURITY", "UNIT_MEASURE", "CURRENCY_DENOM", "VALUATION",
+             "PRICE_BASE", "TRANSFORMATION", "TABLE_IDENTIFIER", "DEBT_BREAKDOWN"]
+PORTFOLIO_ITEMS = {"F2": "deposits", "F22": "deposits_transferable", "F29": "deposits_other",
+                   "F3": "debt_securities", "F511": "listed_shares", "F52": "fund_shares",
+                   "F62": "life_insurance"}
+
+
+def household_assets_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """OECD financial balance sheets (SNA Table 720): what households (and NPISH) hold
+    their financial savings in - deposits, bonds, listed shares, funds, life insurance."""
+    df = oecd(f, "OECD.SDD.NAD,DSD_NASEC20@DF_T720R_A", T720_DIMS,
+              {"FREQ": ["A"], "REF_AREA": [c for c in COUNTRIES if c != "LIE"],
+               "SECTOR": ["S1M"], "ACCOUNTING_ENTRY": ["A"], "TRANSACTION": ["LE"],
+               "INSTR_ASSET": list(PORTFOLIO_ITEMS), "MATURITY": ["T", "_Z"],
+               "UNIT_MEASURE": ["XDC"]},
+              max(since or 2015, 2015))
+    out = pd.DataFrame({"iso3": df["REF_AREA"], "period": df["TIME_PERIOD"],
+                        "value": df["OBS_VALUE"],
+                        "statistic": df["INSTR_ASSET"].map(PORTFOLIO_ITEMS),
+                        "series": "T720 " + df["INSTR_ASSET"]})
+    return frame(out.dropna(subset=["statistic"]), measure="household_assets",
+                 unit="national currency, millions", frequency="A",
+                 source="OECD financial balance sheets (households and NPISH)")
 
 
 def childcare_oecd(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -4868,12 +5031,186 @@ def derive_budget_coverage(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
 
 
 def derive_pensions(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """One row per (country, item): net replacement rates at 0.5 / 1 / 2 x the average wage
+    (mandatory), the retirement age for today's labour-market entrants, and life
+    expectancy at 65 now and projected for 2065, by sex."""
+    rows = []
     p = long[long["measure"] == "pension_replacement"].dropna(subset=["year", "value"])
-    if p.empty:
-        return pd.DataFrame()
-    p = _latest_by(p, ["iso3", "category"])
-    return p[["iso3", "category", "value", "year", "source"]].rename(
-        columns={"value": "net_replacement_rate"})
+    if not p.empty:
+        p = _latest_by(p, ["iso3", "statistic", "category"])
+        item = {"net_rate_half_average": "nrr50", "net_rate_average_earner": "nrr100",
+                "net_rate_double_average": "nrr200"}
+        for r in p.itertuples(index=False):
+            if r.statistic in item:
+                rows.append({"iso3": r.iso3, "item": item[r.statistic] +
+                             ("" if r.category == "mandatory" else "_voluntary"),
+                             "value": float(r.value), "year": int(r.year),
+                             "source": str(r.source)})
+    ret = long[long["measure"] == "retirement"].dropna(subset=["year", "value"])
+    for (iso, stat), g in ret.groupby(["iso3", "statistic"]):
+        if stat == "life_expectancy_at_65":
+            now = int(g.loc[g["year"] <= datetime.now().year, "year"].max()) \
+                if (g["year"] <= datetime.now().year).any() else None
+            for (yr, sex), h in g.groupby(["year", "category"]):
+                tag = "now" if now is not None and int(yr) == now else str(int(yr))
+                if tag == "now" or int(yr) > datetime.now().year:
+                    rows.append({"iso3": iso, "item": f"le65_{sex}_{tag}",
+                                 "value": float(h["value"].mean()), "year": int(yr),
+                                 "source": "OECD Pensions at a Glance (UN WPP)"})
+        else:
+            g = g[g["year"] == g["year"].max()]
+            rows.append({"iso3": iso, "item": {"normal_age_future_entrant": "retirement_age",
+                                              "normal_age_current": "retirement_age_now"}[stat],
+                         "value": round(float(g["value"].mean()), 1),    # men/women average
+                         "year": int(g["year"].iloc[0]), "source": str(g["source"].iloc[0])})
+    return pd.DataFrame(rows)
+
+
+def derive_university(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """Latest household payment to tertiary institutions per FTE student (local money)."""
+    u = long[long["measure"] == "tertiary_private_cost"].dropna(subset=["year", "value"])
+    rows = []
+    for iso, g in u.groupby("iso3"):
+        for stat in ("households", "all_private"):
+            h = g[g["statistic"] == stat]
+            if not h.empty:
+                h = h.sort_values("year").iloc[-1]
+                rows.append({"iso3": iso, "per_student_year": float(h["value"]),
+                             "year": int(h["year"]), "basis": stat,
+                             "source": str(h["source"]), "estimated": stat != "households"})
+                break
+    return pd.DataFrame(rows)
+
+
+# central-bank inflation targets (statutory; the mid-point where a range is set). Denmark
+# pegs to the euro; Switzerland's "price stability" is 0-2%.
+INFLATION_TARGET = {"USA": 2.0, "GBR": 2.0, "CAN": 2.0, "CHE": 1.0, "LIE": 1.0, "NOR": 2.0,
+                    "SWE": 2.0, "DNK": 2.0, "ISL": 2.5, "CZE": 2.0, "POL": 2.5, "HUN": 3.0,
+                    "ROU": 2.5, **{c: 2.0 for c in EURO_MEMBERS}}
+
+
+TERM_PREMIUM = 0.5   # 10-year yield over the expected average short rate (pp); recent
+#                      ACM / Kim-Wright estimates for US Treasuries are ~0.3-0.8
+
+
+def derive_rates(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """Forward-looking interest rates per country. The 10-year government yield, less a
+    term premium, is the average short rate markets expect over the next decade; a fixed
+    mortgage period resets to today's mortgage rate moved by that expected change in
+    short rates, instead of to the historical average. (The usual mortgage spread over
+    the 10-year yield is kept for reference.)"""
+    ir = long[(long["measure"] == "interest_rate")].dropna(subset=["year", "value"])
+    pref = {"mortgage_rate_new_loans": 0, "mortgage_rate_10y_fixed_median": 1,
+            "mortgage_rate_2y_fixed_75ltv": 1, "mortgage_rate_30y_fixed": 1}
+    m = long[long["statistic"].isin(pref)].dropna(subset=["year", "value"])
+    last_full = datetime.now().year - 1
+    rows = []
+    for iso in COUNTRIES:
+        src_iso = "CHE" if iso == "LIE" else iso
+        r = {"iso3": iso, "inflation_target": INFLATION_TARGET.get(iso, 2.0)}
+        g = ir[ir["iso3"] == src_iso]
+        for stat, col in (("govt_bond_10y", "y10"), ("interbank_3m", "short_rate"),
+                          ("deposit_overnight", "deposit_overnight"),
+                          ("deposit_term", "deposit_term")):
+            s = g[g["statistic"] == stat].sort_values("period")
+            if s.empty:
+                continue
+            last = pd.Period(str(s["period"].iloc[-1])[:7], "M")
+            if (pd.Period(datetime.now(), "M") - last).n > 18:
+                continue          # discontinued (e.g. Iceland in the OECD table): not current
+            tail = s.tail(3)                         # last 3 months: smooths one-off moves
+            r[col] = round(float(tail["value"].mean()), 3)
+            r[f"{col}_period"] = str(tail["period"].iloc[-1])
+            r[f"{col}_source"] = str(s["source"].iloc[-1])
+        y10 = g[g["statistic"] == "govt_bond_10y"].groupby("year")["value"].mean()
+        mm = m[m["iso3"] == src_iso]
+        if not mm.empty and not y10.empty:
+            mm = mm[mm["statistic"].map(pref) == mm["statistic"].map(pref).min()]
+            my = mm.groupby("year")["value"].mean()
+            both = pd.concat([my.rename("m"), y10.rename("y")], axis=1).dropna()
+            # last 10 years: spreads moved a lot as e.g. Bulgaria and the Baltics converged
+            both = both[(both.index >= last_full - 9) & (both.index <= last_full)]
+            if len(both) >= 5:
+                r["mortgage_spread"] = round(float((both["m"] - both["y"]).median()), 3)
+                r["spread_years"] = f"{int(both.index.min())}-{int(both.index.max())}"
+                r["mortgage_series"] = str(mm["statistic"].iloc[0])
+        if not mm.empty:
+            mm2 = mm[mm["statistic"].map(pref) == mm["statistic"].map(pref).min()]
+            per = mm2.sort_values("period")
+            r["mortgage_rate_now"] = round(float(per.tail(3)["value"].mean()), 3)
+            r["mortgage_rate_now_period"] = str(per["period"].iloc[-1])
+        if "y10" in r and "short_rate" in r and "mortgage_rate_now" in r:
+            # expectations hypothesis: 10-year yield - term premium = the average short
+            # rate markets expect over the next decade; mortgage rates move with it
+            exp_short = r["y10"] - TERM_PREMIUM
+            r["expected_short_rate"] = round(exp_short, 3)
+            r["mortgage_rate_future"] = round(max(r["mortgage_rate_now"] + exp_short -
+                                                  r["short_rate"], 0.5), 2)
+        rows.append(r)
+    # deposit rates where no central source publishes them: the 3-month rate times the
+    # median pass-through (deposit rate / 3-month rate) of the euro area and the US
+    for col in ("deposit_overnight", "deposit_term"):
+        ratios = [r[col] / r["short_rate"] for r in rows
+                  if col in r and r.get("short_rate", 0) > 0.5]
+        if not ratios:
+            continue
+        k = float(statistics.median(ratios))
+        for r in rows:
+            if col not in r and "short_rate" in r:
+                r[col] = round(max(r["short_rate"] * k, 0.0), 3)
+                r[f"{col}_period"] = r["short_rate_period"]
+                r[f"{col}_source"] = (f"estimate: 3-month rate x {k:.2f}, the median pass-"
+                                      f"through in the {len(ratios)} countries with ECB/FDIC "
+                                      "household deposit rates")
+                r[f"{col}_estimated"] = True
+    return pd.DataFrame(rows)
+
+
+# Danish labour-market pensions are run by life insurers (F62): they are quasi-mandatory
+# pension saving (modelled with the pension), not free savings
+LIFE_INSURANCE_IS_PENSION = {"DNK"}
+
+
+def derive_portfolio(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """How households hold their free financial savings (deposits, bonds, listed shares,
+    funds, life insurance; not pensions or unlisted business equity), latest year with
+    deposits and funds reported. Funds count as shares, life insurance as bonds."""
+    a = long[long["measure"] == "household_assets"].dropna(subset=["year", "value"])
+    rows = []
+    for iso in COUNTRIES:
+        src = "CHE" if iso == "LIE" else iso
+        g = a[a["iso3"] == src]
+        best = None
+        for yr in sorted(g["year"].unique(), reverse=True):
+            p = g[g["year"] == yr].groupby("statistic")["value"].sum(min_count=1)
+            if pd.notna(p.get("deposits")) and pd.notna(p.get("fund_shares")):
+                best = (int(yr), p)
+                break
+        if best is None:
+            rows.append({"iso3": iso})
+            continue
+        yr, p = best
+        v = lambda k: float(p.get(k)) if pd.notna(p.get(k)) else 0.0  # noqa: E731
+        life = 0.0 if iso in LIFE_INSURANCE_IS_PENSION else v("life_insurance")
+        dep, shares = v("deposits"), v("listed_shares") + v("fund_shares")
+        fin = dep + v("debt_securities") + shares + life
+        tr, oth = v("deposits_transferable"), v("deposits_other")
+        rows.append({"iso3": iso, "year": yr, "deposit_share": round(dep / fin, 3),
+                     "equity_share": round(shares / (fin - dep), 3) if fin > dep else None,
+                     "overnight_share": round(tr / (tr + oth), 3) if tr + oth > 0 else None,
+                     "source": "OECD financial balance sheets, households and NPISH" +
+                     (" (Swiss data)" if iso == "LIE" else ""), "estimated": False})
+    df = pd.DataFrame(rows)
+    have = df.dropna(subset=["deposit_share"])
+    eu = have[have["iso3"].map(lambda c: COUNTRIES[c][3] == "EU")]
+    for c in ("deposit_share", "equity_share", "overnight_share"):
+        miss = df[c].isna() if c in df else pd.Series(True, index=df.index)
+        df.loc[miss, c] = round(float(eu[c].median()), 3)
+    gap = df["source"].isna()
+    df.loc[gap, "source"] = "EU median (no national balance sheet with deposits and funds)"
+    df.loc[gap, "estimated"] = True
+    df.loc[gap, "year"] = int(eu["year"].max()) if not eu.empty else None
+    return df
 
 
 def derive_market_index(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
@@ -5054,6 +5391,11 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                        ("BoE mortgage rate", housing_uk_boe),
                        ("ECB mortgage rates", mortgage_rates_ecb),
                        ("SSB/SNB mortgage rates", mortgage_rates_no_ch),
+                       ("OECD interest rates", interest_rates_oecd),
+                       ("Eurostat interest rates", interest_rates_eu),
+                       ("ECB deposit rates", deposit_rates_ecb),
+                       ("FDIC deposit rates", deposit_rates_us),
+                       ("OECD household assets", household_assets_oecd),
                        ("Eurostat energy prices", energy_prices_eu),
                        ("World Bank health", health_worldbank)],
     "life_events": [("OECD childcare", childcare_oecd),
@@ -5061,6 +5403,8 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                     ("Eurostat leaving home", leave_home_europe),
                     ("CPS families (US)", family_us_cps), ("StatCan families", family_canada),
                     ("HBS coverage (EU)", hbs_coverage_eu), ("OECD pensions", pensions_oecd),
+                    ("OECD retirement ages", retirement_oecd),
+                    ("OECD university costs", university_cost_oecd),
                     ("OECD job-loss replacement", job_loss_replacement_oecd),
                     ("EU-SILC emergencies", emergency_eu)],
     "uncertainty": [("WUI", uncertainty_wui), ("WGI", uncertainty_wgi)],
@@ -5213,7 +5557,10 @@ def main(argv: list[str] | None = None) -> int:
                      ("pensions", lambda: derive_pensions(long, ctx)),
                      ("market_index", lambda: derive_market_index(long, ctx)),
                      ("us_states", lambda: derive_us_states(long, ctx)),
-                     ("mortgage_longrun", lambda: derive_mortgage_longrun(long, ctx))]:
+                     ("mortgage_longrun", lambda: derive_mortgage_longrun(long, ctx)),
+                     ("rates", lambda: derive_rates(long, ctx)),
+                     ("university", lambda: derive_university(long, ctx)),
+                     ("portfolio", lambda: derive_portfolio(long, ctx))]:
         derived[name] = timed(name, fn)
     derived["country_snapshot"] = timed("country_snapshot", lambda: derive_snapshot(
         long, ctx, derived["couple_budget"], derived["life_events"], derived["earnings_ppp"]))

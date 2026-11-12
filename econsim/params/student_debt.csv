@@ -1,0 +1,7 @@
+iso3,education,amount,year,source,note
+USA,bachelor,29560,2024,"College Board, Trends in Student Aid 2025: average debt of 2023-24 bachelor's recipients who borrowed (public and private nonprofit four-year)","about half of bachelor's graduates borrow; undergraduate loans only"
+USA,master_plus,29560,2024,"College Board, Trends in Student Aid 2025: average debt of bachelor's recipients who borrowed","undergraduate debt only - add graduate loans by hand"
+GBR,bachelor,47730,2026,"Student Loans Company, Student Loans in England 2025-26: average balance on entry into repayment","England; nearly all full-time students borrow; Plan 5 rules (9% above GBP 25,000, written off after 40 years)"
+GBR,master_plus,47730,2026,"Student Loans Company, Student Loans in England 2025-26: average balance on entry into repayment","England, undergraduate balance; postgraduate loans add more"
+CAN,bachelor,30600,2020,"Statistics Canada, National Graduates Survey (class of 2020): average debt at graduation among bachelor's graduates with debt","about half of graduates have debt"
+CAN,master_plus,33300,2020,"Statistics Canada, National Graduates Survey (class of 2020): average debt at graduation among master's graduates with debt","about half of graduates have debt"

@@ -123,7 +123,7 @@ than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be 
 | `econsim/tax.py` | Local tax curves, joint taxation, youth exemptions; US residents (federal, state, local, FICA); US expats (FEIE/FTC) |
 | `econsim/engine.py` | Year-by-year simulation; `to_display()` for real/nominal and currency |
 | `app.py` | Streamlit + Plotly UI (no modelling code) |
-| `tests/` | `test_engine.py` (synthetic country), `test_params.py` (curated rules), `test_app.py` (AppTest) |
+| `tests/` | `test_engine.py` (synthetic country), `test_life.py` (retirement and life factors), `test_params.py` (curated rules), `test_invariants.py` (every country), `test_app.py` (AppTest) |
 
 ### Curated parameters (`econsim/params/`)
 
@@ -162,9 +162,15 @@ of leaving home, plus childcare until free pre-school. Services (childcare, heal
 with wages. When money runs short, discretionary spending is cut (up to half) before any
 borrowing; employer pension contributions go to a retirement account, not to the deposit. Renting uses new-lease market rents growing with real wages. The purchase
 waits until the down payment, taxes and fees are saved (keeping 6 months' buffer) and the loan
-fits the country's lending limits; fixed periods end at the long-run average rate. Savings are
-invested at the nominal return minus the country's tax drag (plus any employer match); pension
-rights are shown as replacement rate × final net pay × 15.
+fits the country's lending limits; fixed periods end at the rate today's market expects.
+Savings above a 6-month emergency fund are held the way the country's households hold
+theirs (OECD financial balance sheets): part in bank deposits at the rates banks actually pay
+(ECB, FDIC), the rest invested at today's 10-year yield + the households' share in shares ×
+a 3.5% equity premium − fees, minus the country's tax drag, with the share in stocks falling
+to half by retirement. From the
+retirement age for today's young workers, each partner gets a pension (career-average pay
+relative to the average wage × the OECD replacement rate at that pay), indexed to prices, and
+the couple draws savings down slowly until the longer-living partner's projected lifespan.
 
 ## Job market by age and degree
 
@@ -203,15 +209,45 @@ labour force where few teenagers work.
 |---|---|---|
 | `budget_coverage.csv` | National-accounts household consumption ÷ survey spending, per category | Eurostat `nama_10_co3_p3`, `hbs_exp_t121`, `lfst_hhnhtych` (non-EU: EU median) |
 | `family.csv` | Mothers' employment × hours vs women without children; average age of leaving home | Eurostat `lfst_hheredch`, `lfst_hhptechi`, `lfsa_ewhun2`, `yth_demo_030`; CPS microdata; StatCan 14-10-0120 |
-| `pensions.csv` | Net pension replacement rate, average earner | OECD Pensions at a Glance (`DF_PRR`) |
+| `pensions.csv` | Net replacement rates at 0.5/1/2 × average wage, future retirement age, life expectancy at 65 (now, 2065) | OECD Pensions at a Glance (`DF_PRR`, `DF_PAG`) |
 | `market_index.csv` | Home-price, rent and fuel indices: curated levels are moved to the latest data | Eurostat HPI, HICP; BIS (FRED); NAR, BLS, EIA (FRED) |
 | `mortgage_longrun.csv` | 20-year average new-loan mortgage rate | ECB MIR, SSB, SNB, BoE, Freddie Mac |
+| `rates.csv` | 10-year yield, 3-month rate, deposit rates paid to households, mortgage rate now and after a fixed period, inflation target | OECD `DF_FINMARK`, Eurostat `irt_lt_mcby_m` / `irt_st_m`, ECB MIR, FDIC (FRED) |
+| `portfolio.csv` | Households' deposits, bonds, shares, funds and life insurance as shares of free financial savings | OECD `DF_T720R_A` |
+| `university.csv` | Household payments to tertiary institutions per student | OECD Education at a Glance |
 
 The defaults (spending elasticity 0.8, no survey add-back, children at home until the
 national leaving age, the child penalty, the budget constraint) were checked against Eurostat's median saving rate by
 age (`icw_sr_01`), the share of couples who struggle to make ends meet or cannot face an
 unexpected expense (`ilc_mdes09`, `ilc_mdes04`), the age of leaving home, and the Fed's SCF
 net worth of married working couples by age and income.
+
+## The years ahead: today's conditions, not today's retirees
+
+The forecast describes a couple starting out now, under today's markets and legislated rules,
+not what people of each age look like today (their careers ran under different conditions).
+
+| Input | Default | Source |
+|---|---|---|
+| Retirement age | Normal age for someone entering the labour market now (e.g. Denmark 74, Italy and Sweden 70, US 67), with legislated links to life expectancy | OECD Pensions at a Glance `DF_PAG` (FRPLF22) |
+| Pension | Career-average pay ÷ average wage → net replacement rate at 0.5 / 1 / 2 × average wage (mandatory schemes, full career, legislated rules); indexed to prices | OECD `DF_PRR` (NPRR50/100/200) |
+| Plan until | Women's life expectancy at 65 in the year each partner turns 65 (today → 2065 projection) + 2 years for the longer-living partner | OECD `DF_PAG` (UN World Population Prospects) |
+| How savings are held | Households' split of free financial savings: deposits vs bonds, life insurance, listed shares and funds (not pensions or own businesses), e.g. deposits US 16%, Germany 50%, Poland 82%. Or invest everything, or a custom split | OECD financial balance sheets `DF_T720R_A` (households + NPISH; Cyprus, Malta, Iceland: EU median) |
+| Investment return | 10-year government yield (latest 3 months) + the households' share in shares × 3.5% equity premium − 0.2% fees; stocks fall to half by retirement | OECD `DF_FINMARK`, Eurostat `irt_lt_mcby_m` |
+| Emergency fund / deposits | What banks pay households now: overnight deposits; deposits = overnight and fixed-term weighted by households' holdings. Elsewhere the 3-month rate × the median pass-through | ECB MIR (households), FDIC national rates via FRED |
+| Rate after the fixed period | Today's mortgage rate + (10-year yield − 0.5 term premium − 3-month rate): the move in short rates the market expects | as above + ECB MIR, SSB, SNB, BoE, FRED |
+| Inflation | Central-bank target | statutory |
+| Wage growth | Official long-run projections, or the last 20 years' real trend | EC Ageing Report / OBR / CBO / PBO; OECD / Eurostat average wages |
+| House prices and rents | With incomes, or the last 20 years' real trend for 10 years | Eurostat HPI and HICP rents, BIS, FRED |
+| University (optional) | Household payments to tertiary institutions per full-time student | OECD Education at a Glance `DF_UOE_FIN_INDIC_SOURCE_NATURE` |
+| Student debt | Default: borrowers' average by degree (US, UK, Canada); amount, rate and term editable. Rate: US 6.52% (2026-27 federal undergraduate), England RPI (Plan 5, 9% above GBP 25,000), Canada 0% (federal), elsewhere the 10-year yield | `params/student_debt.csv`: College Board, Student Loans Company, StatCan NGS; FSA |
+
+In retirement, spending follows the pension plus savings ÷ years left (as US required minimum
+distributions, which most withdrawals track), or the pension only, leaving savings to heirs. When savings run out, living costs are cut, owners
+borrow against the home, and the state's minimum income for older people covers what remains
+(it is not run up as debt). Optional (off by default): family gifts and inheritances,
+paying part of children's university, a lasting hourly-pay penalty for
+the main parent (Kleven, Landais & Søgaard 2019) and years of paid long-term care.
 
 ## Known limitations
 
@@ -221,8 +257,15 @@ net worth of married working couples by age and income.
   `econsim/params/*.csv` if you know better values.
 * Switzerland, Iceland and Liechtenstein have no budget survey here: a neighbouring country's
   quantities at local prices (scaled to local incomes).
-* Family help (gifts, inheritances, living with parents) is not modelled; in Southern and
-  Eastern Europe it is how many young people buy.
+* Family help is an input, not a forecast: in Southern and Eastern Europe it is how many
+  young people buy (HFCS tables are PDF only).
+* Retirement: no survivor pensions or death of one partner before the horizon; pension-pot
+  withdrawals are not taxed separately (the OECD net rates tax the mandatory pension only);
+  basic/minimum pensions for people with short careers are only covered by the safety net.
+* The savings mix is the whole household sector's, which leans toward wealthier savers: a
+  typical family holds even more in the bank. Interest on deposits is not taxed here.
+* Divorce, disability and health shocks are not modelled (use the job-loss scenario for an
+  income shock).
 * Not modelled: means-tested health subsidies (CH premium reductions, NL zorgtoeslag),
   Hungarian Babavaro loans, child benefits that vary with the child's age, part-time work after
   children (use the leave slider / career growth), US expat state tax, PFIC/NIIT.
