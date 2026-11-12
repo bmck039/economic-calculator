@@ -127,6 +127,7 @@ class CountryData:
     leave_home_age: Optional[Sourced] = None          # children stop being dependants
     # survey under-recording: budget category -> national accounts / HBS ratio (>= 1)
     budget_coverage: dict = field(default_factory=dict)
+    budget_coverage_measured: bool = False   # from this country's own survey vs accounts
     # ---- the years ahead (forward-looking) ------------------------------------------
     retirement_age: Optional[Sourced] = None          # normal age for today's entrants
     le65: dict = field(default_factory=dict)          # (sex, year) -> age reached at 65
@@ -138,6 +139,9 @@ class CountryData:
     wage_trend: Optional[Sourced] = None              # real avg-wage growth, ~20 years
     home_trend: Optional[Sourced] = None              # real house-price growth, ~20 years
     rent_trend: Optional[Sourced] = None              # real rent growth, ~20 years
+    career: Optional[object] = None                   # career.CareerData (US: CPS today)
+    price_trends: dict = field(default_factory=dict)  # budget line -> relative %/yr (10 y)
+    inflation_outlook: dict = field(default_factory=dict)  # 5y breakeven, 5y5y forward
     portfolio: dict = field(default_factory=dict)     # portfolio.csv row: deposit_share,
     #                                                   equity_share, overnight_share
 
@@ -149,6 +153,11 @@ class Earner:
     career_growth: float = 1.0       # 1 = follow the data's age-earnings profile
     works: bool = True
     education: Optional[str] = None  # highest degree (see EDUCATION); None = all levels
+    job: Optional[str] = None        # situation now: FT_grad (full time, job needs the
+    #                                  degree) / FT_nongrad / PT / U (looking); None ->
+    #                                  today's mix for the age and degree (US: CPS)
+    pay_now: Optional[float] = None  # gross pay per month now (local); sets the place in
+    #                                  the pay distribution, kept over the career
 
 
 @dataclass
@@ -211,9 +220,9 @@ class Plan:
     inflation: Optional[float] = None             # None -> 2.0
     real_wage_growth: Optional[float] = None      # None -> see wage_outlook
     # ---- outlook: how today's conditions carry forward ---------------------------------
-    wage_outlook: str = "projection"  # "projection" (official long-run productivity
+    wage_outlook: str = "trend"       # "projection" (official long-run productivity
     #                                  projections) | "trend" (last ~20 years continue)
-    home_outlook: str = "incomes"    # "incomes" (prices and rents keep pace with wages) |
+    home_outlook: str = "trend"      # "incomes" (prices and rents keep pace with wages) |
     #                                  "trend" (last ~20 years' real trend for 10 years,
     #                                  then with incomes)
     rate_outlook: str = "market"     # rate a fixed mortgage resets to: "market" (today's
@@ -252,12 +261,20 @@ class Plan:
     #                                  (US standard plan 10; UK: 9% above the threshold)
     budget_elasticity: float = 0.8   # spending rises with income^elasticity relative to the
     #                                  survey couple (calibrated on Eurostat saving by age)
-    survey_correction: float = 0.0   # share (exponent) of the national-accounts gap in
-    #                                  survey spending that is added back (0 = raw survey;
-    #                                  0.5 fits hardship surveys best but makes buying
-    #                                  implausibly hard where the gap is only estimated)
+    survey_correction: Optional[float] = None  # share (exponent) of the national-
+    #                                  accounts gap in survey spending added back; None ->
+    #                                  0.5 where the country's own gap is measured (EU
+    #                                  budget surveys, US CE vs BEA; fits hardship surveys
+    #                                  best), 0 where it would only be estimated
     child_penalty: bool = True       # primary parent works the country's typical hours
     #                                  while children are young (employment x hours of
     #                                  mothers vs women without children)
     state: Optional[str] = None      # US state (USA only); None -> national averages
     education_pay: bool = True       # scale pay to each earner's degree (if one is set)
+    career_model: bool = True        # US: careers from today's CPS job market (situations,
+    #                                  moves between them, raises by age); False -> the
+    #                                  full-time earnings profile
+    job_market: str = "now"          # "now": today's moves between situations continue |
+    #                                  "trend": the last year's change continues 5 years
+    price_outlook: str = "trend"     # "trend": each cost's last-10-year price trend vs all
+    #                                  prices continues 10 years; "flat": all with prices

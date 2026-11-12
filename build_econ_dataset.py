@@ -116,6 +116,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urlencode, urlparse
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -180,7 +181,9 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #      spreads) for the retirement phase and forward-looking rates and returns.
 #   8: rates gains what banks pay households on deposits (ECB, FDIC); portfolio (how
 #      households split financial savings between deposits, bonds and shares: OECD).
-DATA_VERSION = "8"
+#   9: us_career (CPS: situations, pay, year-on-year moves and raises by age and degree),
+#      price_outlook (relative price trends by budget line; US market inflation outlook).
+DATA_VERSION = "9"
 
 # ==========================================================================
 # Comparability notes
@@ -1757,7 +1760,36 @@ CPS_BASIC = "https://api.census.gov/data/{y}/cps/basic/{m}"
 CPS_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
               "dec"]
 CPS_VARS = ("PRTAGE,PEEDUCA,PEMLR,PRWKSTAT,PRDISC,PEHRWANT,PEHRAVL,PRMJOCC1,PTIO1OCD,"
-            "PWCMPWGT")
+            "PWCMPWGT,PESEX,PTERNWA,PWORWGT,PRERELG,HRMIS,HRHHID,HRHHID2,PULINENO,PESCHENR,"
+            "PEHRUSL1")
+_CPS_MEMO: dict = {}
+
+
+def cps_month(f: CachedFetcher, y: int, i: int) -> pd.DataFrame | None:
+    """One month of CPS basic microdata (ages 16-64), or None if not released / not
+    collected (October 2025: federal shutdown). i = month index 0-11."""
+    if (y, i) in _CPS_MEMO:
+        return _CPS_MEMO[(y, i)]
+    key = os.environ.get("CENSUS_API_KEY")
+    if not key:
+        raise FetchError("CPS microdata needs CENSUS_API_KEY (free: "
+                         "https://api.census.gov/data/key_signup.html)")
+    try:
+        js = json.loads(f.get(CPS_BASIC.format(y=y, m=CPS_MONTHS[i]),
+                              {"get": CPS_VARS, "PRTAGE": "16:64", "key": key},
+                              label=f"census:cps:{y}-{CPS_MONTHS[i]}", validate=is_json,
+                              timeout=180))
+    except FetchError as e:
+        if "HTTP 404" in str(e) or "unexpected response" in str(e) or "HTTP 204" in str(e):
+            _CPS_MEMO[(y, i)] = None
+            return None
+        raise
+    d = pd.DataFrame(js[1:], columns=js[0]).loc[:, lambda x: ~x.columns.duplicated()]
+    ids = d[["HRHHID", "HRHHID2"]].astype(str)
+    d = d.drop(columns=["HRHHID", "HRHHID2"]).apply(pd.to_numeric, errors="coerce")
+    d = pd.concat([d, ids], axis=1).assign(month=i + 1, year=y)
+    _CPS_MEMO[(y, i)] = d
+    return d
 # Sales / office occupations that ISCO-08 puts in major groups 2-3 (professionals,
 # associate professionals): graduate-level jobs for the over-qualification measure.
 CPS_GRAD_OCC = {4710, 4800, 4810, 4820, 4840, 4850, 4920, 4930, 5000, 5250, 5500, 5710,
@@ -1807,29 +1839,16 @@ def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     """US rates by age and education straight from the CPS basic monthly microdata (Census
     API), pooled by calendar year: the current year so far and last year. BLS publishes
     no age x education U-6, and OECD/BLS annual tables lag (or, for 2025, are missing)."""
-    key = os.environ.get("CENSUS_API_KEY")
-    if not key:
-        raise FetchError("CPS microdata needs CENSUS_API_KEY (free: "
-                         "https://api.census.gov/data/key_signup.html)")
     now = datetime.now()
     rows = []
     for y in (now.year - 1, now.year):
         months = []
-        for i, mon in enumerate(CPS_MONTHS):
+        for i in range(12):
             if y == now.year and i + 1 >= now.month:
                 break
-            try:
-                js = json.loads(f.get(CPS_BASIC.format(y=y, m=mon),
-                                      {"get": CPS_VARS, "PRTAGE": "16:64", "key": key},
-                                      label=f"census:cps:{y}-{mon}", validate=is_json,
-                                      timeout=120))
-            except FetchError as e:
-                if "HTTP 404" in str(e) or "unexpected response" in str(e):
-                    continue  # not released, or not collected (Oct 2025: shutdown)
-                raise
-            d = pd.DataFrame(js[1:], columns=js[0]).loc[:, lambda x: ~x.columns.duplicated()]
-            d = d.apply(pd.to_numeric, errors="coerce")
-            months.append(d.assign(month=i + 1))
+            d = cps_month(f, y, i)
+            if d is not None:
+                months.append(d.copy())
         if not months:
             continue
         d = pd.concat(months, ignore_index=True)
@@ -1858,6 +1877,181 @@ def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                  "marginally attached) / (labour force + marginally attached); "
                  "overqualification = employed outside management, business, financial and "
                  "professional occupations (approximates ISCO 4-9).")
+
+
+CAREER_STATES = ["FT_grad", "FT_nongrad", "PT", "U"]
+CAREER_BANDS = {"20-24": (20, 24), "25-29": (25, 29), "30-34": (30, 34), "35-39": (35, 39),
+                "40-44": (40, 44), "45-49": (45, 49), "50-54": (50, 54), "55-59": (55, 59),
+                "60-64": (60, 64)}
+CAREER_GROUPS = {"20-24": (20, 24), "25-29": (25, 29), "30-34": (30, 34), "35-44": (35, 44),
+                 "45-54": (45, 54), "55-64": (55, 64)}
+CAREER_EDU = {"below_upper_secondary": ["below_upper_secondary"],
+              "upper_secondary": ["upper_secondary"], "short_tertiary": ["short_tertiary"],
+              "bachelor": ["bachelor"], "master_plus": ["master_plus"],
+              "no_degree": ["below_upper_secondary", "upper_secondary"],
+              "degree": ["bachelor", "master_plus"], "all": None}
+EARN_Q = (10, 25, 50, 75, 90)
+
+
+def cps_career_state(d: pd.DataFrame) -> pd.Series:
+    """Each person's situation: full-time in a graduate-level job (management, business,
+    financial, professional, or the sales/office jobs ISCO puts in groups 2-3), full-time
+    in another job, part-time (< 35 usual hours), or unemployed (incl. discouraged and
+    other marginally attached workers). Students (enrolled, 16-24) and people not looking
+    for work are left out."""
+    emp = d["PEMLR"].isin([1, 2])
+    un = d["PEMLR"].isin([3, 4]) | (d["PEMLR"].between(5, 7) & d["PRDISC"].isin([1, 2]))
+    hrs = d["PEHRUSL1"]
+    pt = emp & (hrs.between(1, 34) | ((hrs < 0) & d["PRWKSTAT"].isin([3, 4, 5, 6])))
+    grad = d["PRMJOCC1"].isin([1, 2]) | d["PTIO1OCD"].isin(CPS_GRAD_OCC)
+    st = np.select([un, pt, emp & grad, emp], ["U", "PT", "FT_grad", "FT_nongrad"], "NILF")
+    st = pd.Series(st, index=d.index)
+    st[d["PESCHENR"] == 1] = "student"
+    return st
+
+
+def _wq(x: pd.Series, w: pd.Series, qs) -> list[float]:
+    o = np.argsort(x.to_numpy())
+    xv, wv = x.to_numpy()[o], w.to_numpy()[o]
+    c = np.cumsum(wv) / wv.sum()
+    return [float(xv[min(np.searchsorted(c, q / 100), len(xv) - 1)]) for q in qs]
+
+
+def _edu_mask(edu: pd.Series, key: str) -> pd.Series:
+    v = CAREER_EDU[key]
+    return pd.Series(True, index=edu.index) if v is None else edu.isin(v)
+
+
+def career_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """The current US career picture from CPS microdata, last 12 months vs the 12 before:
+    shares of each situation by age and degree; pay distributions in each (outgoing
+    rotation groups); year-on-year moves between situations and individual pay growth
+    (the same people matched one year apart, months-in-sample 1-4 -> 5-8 and 4 -> 8)."""
+    now = pd.Period(datetime.now(), "M")
+    got = {}
+    for k in range(1, 40):                       # newest release back ~3 years
+        per = now - k
+        d = cps_month(f, per.year, per.month - 1)
+        if d is not None:
+            d = d.copy()
+            d["edu"] = cps_education(d["PEEDUCA"]).astype(str)
+            d["state"] = cps_career_state(d)
+            got[per] = d
+    if not got:
+        raise FetchError("CPS microdata: no months fetched")
+    last = max(got)
+    cpi = fred(f, "CPIAUCSL").assign(per=lambda x: pd.PeriodIndex(x["date"].str[:7], freq="M"))
+    cpi = cpi.set_index("per")["value"]
+    rows = []
+
+    def add(window, stat, band, edu, value, n, method):
+        rows.append({"iso3": "USA", "period": str(window[1]), "age_band": band,
+                     "category": edu, "statistic": stat, "value": value,
+                     "method": f"{method}; n={n}; {window[0]}..{window[1]}",
+                     "estimated": False})
+
+    for wname, (w0, w1) in {"current": (last - 11, last),
+                            "prior": (last - 23, last - 12)}.items():
+        months = [m for m in got if w0 <= m <= w1]
+        if not months:
+            continue
+        win = (w0, w1)
+        tag = lambda s: s if wname == "current" else f"prior:{s}"  # noqa: E731
+        d = pd.concat([got[m] for m in months], ignore_index=True)
+        d["wc"] = d["PWCMPWGT"] / len(months)
+        d["wo"] = d["PWORWGT"] / len(months)
+        inlf = d["state"].isin(CAREER_STATES)
+        org = d["HRMIS"].isin([4, 8]) & d["state"].isin(CAREER_STATES[:3]) & \
+            (d["PRERELG"] == 1) & (d["PTERNWA"] > 0)
+        for band, (lo, hi) in CAREER_BANDS.items():
+            b = d["PRTAGE"].between(lo, hi)
+            for ek in CAREER_EDU:
+                m = b & _edu_mask(d["edu"], ek)
+                s = d[m & inlf]
+                if len(s) < 50:
+                    continue
+                tot = s["wc"].sum()
+                for stn in CAREER_STATES:
+                    add(win, tag(f"share|{stn}"), band, ek,
+                        float(s.loc[s["state"] == stn, "wc"].sum() / tot), len(s),
+                        "share of the labour force (incl. discouraged), students excluded")
+                if wname != "current":
+                    continue
+                for stn in CAREER_STATES[:3]:
+                    e = d[m & org & (d["state"] == stn)]
+                    if len(e) < 30:
+                        continue
+                    for q, v in zip(EARN_Q, _wq(e["PTERNWA"], e["wo"], EARN_Q)):
+                        add(win, f"earn_q{q}|{stn}", band, ek, v * 52 / 12, len(e),
+                            "usual weekly earnings x 52 / 12, outgoing rotation groups")
+        # ---- the same people one year apart
+        pairs, grow = [], []
+        for m in months:
+            prev = m - 12
+            if prev not in got:
+                continue
+            a, b = got[prev], got[m]
+            k = ["HRHHID", "HRHHID2", "PULINENO"]
+            x = a[a["HRMIS"].between(1, 4)].merge(b[b["HRMIS"].between(5, 8)], on=k,
+                                                  suffixes=("0", "1"))
+            ok = (x["PESEX0"] == x["PESEX1"]) & (x["PRTAGE1"] - x["PRTAGE0"]).between(0, 2)
+            x = x[ok]
+            pairs.append(x)
+            g = x[(x["HRMIS0"] == 4) & (x["HRMIS1"] == 8) & (x["PRERELG0"] == 1) &
+                  (x["PRERELG1"] == 1) & (x["PTERNWA0"] > 0) & (x["PTERNWA1"] > 0) &
+                  x["state0"].isin(CAREER_STATES[:3]) & (x["state1"] == x["state0"])]
+            if prev in cpi.index and m in cpi.index:
+                g = g.assign(cpi_g=float(cpi[m] / cpi[prev] - 1))
+                grow.append(g)
+        if pairs:
+            x = pd.concat(pairs, ignore_index=True)
+            x = x[x["state0"].isin(CAREER_STATES) & x["state1"].isin(CAREER_STATES)]
+            for grp, (lo, hi) in CAREER_GROUPS.items():
+                for ek in CAREER_EDU:
+                    sub = x[x["PRTAGE0"].between(lo, hi) & _edu_mask(x["edu0"], ek)]
+                    for s0 in CAREER_STATES:
+                        o = sub[sub["state0"] == s0]
+                        if len(o) < 40:
+                            continue
+                        tot = o["PWCMPWGT0"].sum()
+                        for s1 in CAREER_STATES:
+                            add(win, tag(f"trans|{s0}>{s1}"), grp, ek,
+                                float(o.loc[o["state1"] == s1, "PWCMPWGT0"].sum() / tot),
+                                len(o), "share of those in the first situation who are in "
+                                "the second a year later (matched CPS households)")
+        if grow and wname == "current":
+            g = pd.concat(grow, ignore_index=True)
+            g["lg"] = np.log(g["PTERNWA1"] / g["PTERNWA0"])
+            g = g[g["lg"].abs() < 1.5]          # coding errors (e.g. weekly vs annual)
+            infl = float(np.log(1 + g["cpi_g"]).mean())
+            add(win, "cpi_yoy", "total", "all", 100 * (np.exp(infl) - 1), len(g),
+                "CPI-U change over the matched years")
+            ahe = fred(f, "CES0500000003")
+            ahe = ahe.assign(per=pd.PeriodIndex(ahe["date"].str[:7], freq="M")).set_index(
+                "per")["value"]
+            yo = [ahe[m] / ahe[m - 12] - 1 for m in months if m in ahe.index and
+                  (m - 12) in ahe.index]
+            if yo:
+                add(win, "agg_wage_yoy", "total", "all", 100 * float(np.mean(yo)), len(yo),
+                    "average hourly earnings, all private employees (BLS CES), change over "
+                    "a year")
+            for grp, (lo, hi) in list(CAREER_GROUPS.items()) + [("25-54", (25, 54)),
+                                                                 ("16-64", (16, 64))]:
+                for ek in ("all", "degree", "no_degree", "short_tertiary", "bachelor",
+                           "master_plus"):
+                    sub = g[g["PRTAGE0"].between(lo, hi) & _edu_mask(g["edu0"], ek)]
+                    if len(sub) < 60:
+                        continue
+                    med = _wq(sub["lg"], sub["PWORWGT0"], (50,))[0]
+                    add(win, "pay_growth_median", grp, ek, 100 * (np.exp(med) - 1),
+                        len(sub), "median change in the same worker's usual weekly pay over "
+                        "a year, nominal, workers in the same situation both years (moves "
+                        "between situations are modelled separately)")
+    if not rows:
+        raise FetchError("CPS career: nothing computed")
+    return frame(pd.DataFrame(rows).assign(series="CPS basic monthly"), measure="us_career",
+                 frequency="A", unit="share / USD per month / %",
+                 source="Census/BLS CPS microdata (Census API)")
 
 
 def vacancies_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -2099,8 +2293,20 @@ def spending_eu_hbs(f: CachedFetcher, since: int | None) -> pd.DataFrame:
 
 
 HICP_CODES = ["CP00", "CP01", "CP011", "CP012", "CP02", "CP03", "CP04", "CP041", "CP043",
-              "CP044", "CP045", "CP05", "CP06", "CP07", "CP071", "CP072", "CP0722", "CP073",
-              "CP08", "CP09", "CP10", "CP11", "CP12", "CP125"]
+              "CP044", "CP045", "CP05", "CP06", "CP07", "CP071", "CP072", "CP0721", "CP0722",
+              "CP0723", "CP0724", "CP073", "CP08", "CP09", "CP10", "CP11", "CP12", "CP124",
+              "CP125", "CP1252", "CP1253", "CP1254"]
+# US CPI components (FRED, seasonally adjusted where available) for each budget line
+US_CPI_PARTS = {"all": "CPIAUCSL", "groceries": "CUSR0000SAF11",
+                "restaurants_hotels": "CUSR0000SEFV", "alcohol_tobacco": "CUSR0000SAF116",
+                "clothing": "CUSR0000SAA", "furnishings_household": "CUSR0000SAH3",
+                "household_operations": "CUSR0000SAH3", "utilities_phone": "CUSR0000SAH2",
+                "health_out_of_pocket": "CUSR0000SAM", "insurance_health": "CUSR0000SAM2",
+                "recreation": "CUSR0000SAR", "education": "CUSR0000SAE1",
+                "transport_services": "CUSR0000SAS4", "personal_misc": "CUSR0000SAG",
+                "vehicle_purchase": "CUSR0000SETA02", "vehicle_running": "CUSR0000SETD",
+                "insurance_vehicle": "CUSR0000SETE", "childcare": "CUUR0000SEEB03",
+                "rent": "CUSR0000SEHA"}
 
 
 def hicp_eurostat(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -2112,6 +2318,41 @@ def hicp_eurostat(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                         "unit": "index", "series": "prc_hicp_aind:" + df["coicop"]})
     return frame(out, measure="price_level", frequency="A", source="Eurostat HICP",
                  comparability_note="Harmonised index of consumer prices, annual average.")
+
+
+def prices_us_cpi_parts(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """US CPI by component (annual averages of complete years), to see which costs have
+    been rising faster than prices in general."""
+    parts = []
+    for key, sid in US_CPI_PARTS.items():
+        try:
+            d = fred(f, sid)
+        except FetchError as e:
+            log.warning("FRED %s skipped: %s", sid, e)
+            continue
+        d = d.assign(year=d["date"].str[:4])
+        n = d.groupby("year")["value"].transform("size")
+        a = d[n == 12].groupby("year")["value"].mean().reset_index()
+        parts.append(pd.DataFrame({"iso3": "USA", "period": a["year"], "value": a["value"],
+                                   "category": key, "series": f"FRED {sid}"}))
+    if not parts:
+        raise FetchError("no US CPI components")
+    return frame(pd.concat(parts, ignore_index=True), measure="price_level",
+                 statistic="cpi_component", unit="index", frequency="A",
+                 source="BLS CPI by component (FRED)")
+
+
+def inflation_outlook_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """What bond markets expect US inflation to be: 5-year breakeven (TIPS vs nominal
+    Treasuries) and the 5-year, 5-year-forward rate (FRED, daily -> monthly means)."""
+    parts = []
+    for sid, stat in (("T5YIE", "breakeven_5y"), ("T5YIFR", "forward_5y5y")):
+        d = fred(f, sid)
+        m = d.assign(period=d["date"].str[:7]).groupby("period")["value"].mean()
+        parts.append(pd.DataFrame({"iso3": "USA", "period": m.index, "value": m.values,
+                                   "statistic": stat, "series": f"FRED {sid}"}))
+    return frame(pd.concat(parts, ignore_index=True), measure="inflation_outlook",
+                 unit="% p.a.", frequency="M", source="FRED (Federal Reserve Board)")
 
 
 CE_ITEMS = ["TOTALEXP", "FOODHOME", "FOODAWAY", "ALCBEVG", "HOUSING", "SHELTER", "OWNDWELL",
@@ -2379,7 +2620,8 @@ def rent_index_eu(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                  comparability_note="Rent index of sitting and new tenants (HICP CP041).")
 
 
-BIS_HPI = {"GBR": "QGBN628BIS", "CAN": "QCAN628BIS", "CHE": "QCHN628BIS"}
+BIS_HPI = {"GBR": "QGBN628BIS", "CAN": "QCAN628BIS", "CHE": "QCHN628BIS",
+           "USA": "QUSN628BIS"}
 
 
 def house_prices_bis(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -2945,6 +3187,46 @@ def hbs_coverage_eu(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                  source="Eurostat HBS / national accounts / LFS",
                  comparability_note="Household budget survey vs national-accounts household "
                  "consumption by COICOP division.")
+
+
+# US: BEA personal consumption (NIPA table 2.4.5, $bn) vs the BLS Consumer Expenditure
+# Survey (all consumer units, $ per unit), matched to the same COICOP divisions as Europe
+US_COVERAGE = {"CP01": (["DFXARC1A027NBEA", "-DAOPRC1A027NBEA"], ["CXUFOODHOMELB0101M"]),
+               "CP02": (["DAOPRC1A027NBEA", "DTOBRC1A027NBEA"],
+                        ["CXUALCBEVGLB0101M", "CXUTOBACCOLB0101M"]),
+               "CP03": (["DCLORC1A027NBEA"], ["CXUAPPARELLB0101M"]),
+               "CP05": (["DFDHRC1A027NBEA"], ["CXUHHFURNSHLB0101M"]),
+               "CP09": (["DRCARC1A027NBEA", "DREQRC1A027NBEA"], ["CXUENTRTAINLB0101M"]),
+               "CP10": (["DEDURC1A027NBEA"], ["CXUEDUCATNLB0101M"]),
+               "CP11": (["DFSERC1A027NBEA"], ["CXUFOODAWAYLB0101M"])}
+
+
+def coverage_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """US version of the survey under-recording inputs: BEA PCE by product vs BLS CE means
+    for all consumer units, and the number of households (Census CPS/HVS, FRED)."""
+    def annual(sid):
+        d = fred(f, sid.lstrip("-"))
+        a = d.assign(y=d["date"].str[:4]).groupby("y")["value"].mean()
+        return -a if sid.startswith("-") else a
+    rows = []
+    for cp, (pce, ce) in US_COVERAGE.items():
+        na = sum(annual(s) for s in pce) * 1000.0        # $bn -> $m
+        sv = sum(annual(s) for s in ce)
+        for y, v in na.dropna().items():
+            rows.append({"period": y, "value": v, "statistic": "na_meur", "category": cp,
+                         "unit": "million USD", "series": "+".join(pce)})
+        for y, v in sv.dropna().items():
+            rows.append({"period": y, "value": v, "statistic": "hbs_eur_per_household",
+                         "category": cp, "unit": "USD/year", "series": "+".join(ce)})
+    for y, v in annual("TTLHHM156N").dropna().items():
+        rows.append({"period": y, "value": v, "statistic": "households_ths", "category": "all",
+                     "unit": "thousand", "series": "TTLHHM156N"})
+    df = pd.DataFrame(rows).assign(iso3="USA")
+    df = df[df["period"].astype(int) >= 2015]
+    return frame(df, measure="hbs_coverage", frequency="A",
+                 source="BEA PCE / BLS CE / Census households (FRED)",
+                 comparability_note="Consumer Expenditure Survey vs national-accounts "
+                 "personal consumption by category.")
 
 
 PRR_DIMS = ["REF_AREA", "FREQ", "MEASURE", "UNIT_MEASURE", "SEX", "AGE", "OPTIONALITY"]
@@ -5015,7 +5297,8 @@ def derive_budget_coverage(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     r = r.groupby(["iso3", "coicop"], as_index=False).agg(ratio=("ratio", "mean"),
                                                           year=("year", "max"))
     out = []
-    med = r.groupby("coicop")["ratio"].median()
+    med = r[r["iso3"].map(lambda c: COUNTRIES.get(c, ("", "", "", ""))[3] == "EU")] \
+        .groupby("coicop")["ratio"].median()
     for iso in COUNTRIES:
         for cat, cp in COVERAGE_CATS.items():
             m = r[(r.iso3 == ("CHE" if iso == "LIE" else iso)) & (r.coicop == cp)]
@@ -5024,9 +5307,12 @@ def derive_budget_coverage(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
             out.append({"iso3": iso, "category": cat, "coicop": cp, "raw_ratio": round(raw, 3),
                         "ratio": round(min(max(raw, 1.0), COVERAGE_CAP.get(cp, 2.0)), 3),
                         "year": None if est else int(m["year"].iloc[0]), "estimated": est,
-                        "source": "Eurostat national accounts (nama_10_co3_p3) / HBS "
-                                  "(hbs_exp_t121) per household" + (
-                                      " - EU median (no HBS for this country)" if est else "")})
+                        "source": ("BEA personal consumption / BLS Consumer Expenditure "
+                                   "Survey, per household" if iso == "USA" and not est else
+                                   "Eurostat national accounts (nama_10_co3_p3) / HBS "
+                                   "(hbs_exp_t121) per household" + (
+                                       " - EU median (no survey comparison for this "
+                                       "country)" if est else ""))})
     return pd.DataFrame(out)
 
 
@@ -5166,6 +5452,90 @@ def derive_rates(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def derive_us_career(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """us_career.csv: one row per number - kind (share / earn / trans / growth / cpi),
+    window (current = last 12 months, prior = the 12 before), age band, education,
+    situation (and the situation a year later, for moves), pay quantile."""
+    c = long[long["measure"] == "us_career"].dropna(subset=["value"])
+    rows = []
+    for r in c.itertuples(index=False):
+        stat = str(r.statistic)
+        window = "current"
+        if stat.startswith("prior:"):
+            window, stat = "prior", stat[6:]
+        name, _, st = stat.partition("|")
+        kind, q, s0, s1 = name, None, st or None, None
+        if name.startswith("earn_q"):
+            kind, q = "earn", int(name[6:])
+        elif name == "trans":
+            s0, s1 = st.split(">")
+        elif name == "pay_growth_median":
+            kind = "growth"
+        elif name == "cpi_yoy":
+            kind = "cpi"
+        elif name == "agg_wage_yoy":
+            kind = "agg_growth"
+        m = re.search(r"n=(\d+); (\S+)\.\.(\S+)", str(r.method))
+        rows.append({"kind": kind, "window": window, "age_band": r.age_band,
+                     "education": r.category, "state": s0, "to_state": s1, "q": q,
+                     "value": float(r.value), "n": int(m.group(1)) if m else None,
+                     "from": m.group(2) if m else None, "to": m.group(3) if m else None})
+    return pd.DataFrame(rows)
+
+
+PRICE_TREND_YEARS = 10
+
+
+def derive_price_outlook(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """Current price trends: how much faster (or slower) each budget line's prices rose than
+    prices in general over the last 10 complete years (HICP by COICOP in Europe, CPI
+    components in the US), and US market inflation expectations."""
+    rows = []
+    pl = long[long["measure"] == "price_level"].dropna(subset=["year", "value"])
+    hicp = pl[pl["statistic"] == "hicp_index"]
+    code_for = {}
+    for code, key in COICOP_CATS.items():          # most specific code wins
+        if code in HICP_CODES and len(code) >= len(code_for.get(key, "")):
+            code_for[key] = code
+    code_for.update({"childcare": "CP124", "phone_internet": "CP08",
+                     "vehicle_running": "CP0723", "rent": "CP041"})
+    sources = []
+    for iso, g in hicp.groupby("iso3"):
+        sources.append((iso, g.pivot_table(index="year", columns="category", values="value"),
+                        "CP00", code_for, "Eurostat HICP"))
+    us = pl[(pl["statistic"] == "cpi_component") & (pl["iso3"] == "USA")]
+    if not us.empty:
+        sources.append(("USA", us.pivot_table(index="year", columns="category",
+                                              values="value"), "all",
+                        {k: k for k in US_CPI_PARTS if k != "all"}, "BLS CPI (FRED)"))
+    for iso, t, all_code, cmap, src in sources:
+        if all_code not in t:
+            continue
+        t = t.dropna(subset=[all_code])
+        if t.empty:
+            continue
+        y1 = int(t.index.max())
+        y0 = y1 - PRICE_TREND_YEARS
+        if y0 not in t.index:
+            continue
+        base = (t.loc[y1, all_code] / t.loc[y0, all_code]) ** (1 / PRICE_TREND_YEARS)
+        for key, code in cmap.items():
+            if code not in t or pd.isna(t.loc[y0, code]) or pd.isna(t.loc[y1, code]):
+                continue
+            g = (t.loc[y1, code] / t.loc[y0, code]) ** (1 / PRICE_TREND_YEARS)
+            rows.append({"iso3": iso, "item": f"rel:{key}",
+                         "value": round(100 * (g / base - 1), 3),
+                         "period": f"{y0}-{y1}", "source": f"{src} {code} vs all items"})
+    io = long[long["measure"] == "inflation_outlook"].dropna(subset=["value"])
+    for stat, item in (("breakeven_5y", "inflation_5y"), ("forward_5y5y", "inflation_5y5y")):
+        s_ = io[io["statistic"] == stat].sort_values("period").tail(3)
+        if not s_.empty:
+            rows.append({"iso3": "USA", "item": item, "value": round(float(s_["value"].mean()), 3),
+                         "period": str(s_["period"].iloc[-1]),
+                         "source": f"{s_['series'].iloc[-1]} (last 3 months)"})
+    return pd.DataFrame(rows)
+
+
 # Danish labour-market pensions are run by life insurers (F62): they are quasi-mandatory
 # pension saving (modelled with the pension), not free savings
 LIFE_INSURANCE_IS_PENSION = {"DNK"}
@@ -5247,7 +5617,10 @@ def derive_market_index(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     # one source per country and index: the most recent one (Eurostat stops for the UK in
     # 2019), Eurostat on a tie
     last = df.groupby(["iso3", "index", "source"])["year"].transform("max")
-    df["rank"] = -last * 2 + df["source"].map(lambda x: 0 if "Eurostat" in x else 1)
+    cnt = df.groupby(["iso3", "index", "source"])["year"].transform("count")
+    # newest first, then Eurostat, then the longest series (US: BIS index over NAR medians)
+    df["rank"] = -last * 10_000 + df["source"].map(lambda x: 0 if "Eurostat" in x else
+                                                     5_000) - cnt
     best = df.groupby(["iso3", "index"])["rank"].transform("min")
     return df[df["rank"] == best].drop(columns="rank").sort_values(["iso3", "index", "year"])
 
@@ -5371,7 +5744,8 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                    ("OECD involuntary part-time", involuntary_pt_oecd),
                    ("StatCan supplementary rates", slack_canada),
                    ("ONS discouraged workers", slack_uk),
-                   ("CPS microdata (US)", labour_us_cps), ("Eurostat JVS", vacancies_europe),
+                   ("CPS microdata (US)", labour_us_cps), ("CPS careers (US)", career_us_cps),
+                   ("Eurostat JVS", vacancies_europe),
                    ("JOLTS", vacancies_us), ("StatCan JVWS", vacancies_canada),
                    ("ONS vacancies", vacancies_uk)],
     "saving": [("OECD saving", saving_oecd), ("Eurostat saving", saving_eurostat)],
@@ -5394,6 +5768,8 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                        ("OECD interest rates", interest_rates_oecd),
                        ("Eurostat interest rates", interest_rates_eu),
                        ("ECB deposit rates", deposit_rates_ecb),
+                       ("US CPI components", prices_us_cpi_parts),
+                       ("US inflation outlook", inflation_outlook_us),
                        ("FDIC deposit rates", deposit_rates_us),
                        ("OECD household assets", household_assets_oecd),
                        ("Eurostat energy prices", energy_prices_eu),
@@ -5402,7 +5778,8 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                     ("Eurostat mothers' work", family_work_europe),
                     ("Eurostat leaving home", leave_home_europe),
                     ("CPS families (US)", family_us_cps), ("StatCan families", family_canada),
-                    ("HBS coverage (EU)", hbs_coverage_eu), ("OECD pensions", pensions_oecd),
+                    ("HBS coverage (EU)", hbs_coverage_eu), ("CE coverage (US)", coverage_us),
+                    ("OECD pensions", pensions_oecd),
                     ("OECD retirement ages", retirement_oecd),
                     ("OECD university costs", university_cost_oecd),
                     ("OECD job-loss replacement", job_loss_replacement_oecd),
@@ -5560,7 +5937,9 @@ def main(argv: list[str] | None = None) -> int:
                      ("mortgage_longrun", lambda: derive_mortgage_longrun(long, ctx)),
                      ("rates", lambda: derive_rates(long, ctx)),
                      ("university", lambda: derive_university(long, ctx)),
-                     ("portfolio", lambda: derive_portfolio(long, ctx))]:
+                     ("portfolio", lambda: derive_portfolio(long, ctx)),
+                     ("price_outlook", lambda: derive_price_outlook(long, ctx)),
+                     ("us_career", lambda: derive_us_career(long, ctx))]:
         derived[name] = timed(name, fn)
     derived["country_snapshot"] = timed("country_snapshot", lambda: derive_snapshot(
         long, ctx, derived["couple_budget"], derived["life_events"], derived["earnings_ppp"]))

@@ -59,6 +59,8 @@ class DataStore:
         self.rates = rd("rates")
         self.university = rd("university")
         self.portfolio = rd("portfolio")
+        self.us_career = rd("us_career")
+        self.price_outlook = rd("price_outlook")
         if not self.snap.empty:
             COUNTRY_NAMES.update(dict(zip(self.snap["iso3"], self.snap["country"])))
 
@@ -326,7 +328,8 @@ class DataStore:
 
     def _family(self, iso3: str) -> dict:
         out: dict = {"family_earn": {}, "family_emp": {}, "family_src": None,
-                     "leave_home_age": None, "budget_coverage": {}}
+                     "leave_home_age": None, "budget_coverage": {},
+                     "budget_coverage_measured": False}
         F = self.family
         if not F.empty:
             f = F[F["iso3"] == iso3]
@@ -348,8 +351,13 @@ class DataStore:
                                                 "" if _nan(r["method"]) else str(r["method"]))
         C = self.coverage
         if not C.empty:
-            out["budget_coverage"] = {r.category: float(r.ratio) for r in
-                                      C[C["iso3"] == iso3].itertuples()}
+            mine = C[C["iso3"] == iso3]
+            out["budget_coverage"] = {r.category: float(r.ratio) for r in mine.itertuples()}
+            # the default add-back is for the US only: European spending was calibrated on
+            # Eurostat saving rates by age with raw survey spending; the US Consumer
+            # Expenditure Survey implies married couples save a third of their income
+            out["budget_coverage_measured"] = iso3 == "USA" and bool(
+                (~mine["estimated"].astype(bool)).any()) if "estimated" in mine else False
         return out
 
     def _pension_rows(self, iso3: str) -> pd.DataFrame:
@@ -435,6 +443,19 @@ class DataStore:
             if not pf.empty:
                 out["portfolio"] = {k: v for k, v in pf.iloc[0].to_dict().items()
                                     if not _nan(v)}
+        if iso3 == "USA" and not self.us_career.empty:
+            from .career import CareerData
+            out["career"] = CareerData.from_table(self.us_career)
+        if not self.price_outlook.empty:
+            po = self.price_outlook[self.price_outlook["iso3"] ==
+                                    ("CHE" if iso3 == "LIE" else iso3)]
+            out["price_trends"] = {str(r.item)[4:]: (float(r.value), str(r.period),
+                                                    str(r.source))
+                                   for r in po.itertuples() if str(r.item).startswith("rel:")}
+            out["inflation_outlook"] = {str(r.item): (float(r.value), str(r.period),
+                                                     str(r.source))
+                                        for r in po.itertuples()
+                                        if str(r.item).startswith("inflation_")}
         out["wage_trend"] = self._trend_wage(iso3)
         out["home_trend"] = self._trend_index(iso3, "home_price", cd)
         out["rent_trend"] = self._trend_index(iso3, "rent", cd)

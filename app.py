@@ -136,15 +136,54 @@ with sb.expander("👫 Partners & career", expanded=True):
                       help=edu_help)
     d2 = c2.selectbox("P2 highest degree", edu_opts, format_func=lambda k: EDU_SHORT[k or "all"],
                       help=edu_help)
+    CAR = cd.career
+    job_lbl = {None: "Typical for our age & degree", "FT_grad": "Full time, job needs my degree",
+               "FT_nongrad": "Full time, job doesn't need a degree", "PT": "Part time",
+               "U": "Looking for work"}
+    job_opts = list(job_lbl) if CAR is not None else [None]
+    mix_help = ""
+    if CAR is not None:
+        def _mix(a, e):
+            m = CAR.mix(a, e)
+            return ", ".join(f"{job_lbl[k].lower()} {v:.0%}" for k, v in m.items())
+        mix_help = (f" Today (CPS, {CAR.window}), people your age with your degree who work "
+                    f"or look for work: P1 {_mix(int(a1), d1)}; P2 {_mix(int(a2), d2)}.")
+    j1 = c1.selectbox("P1 now", job_opts, format_func=job_lbl.get, key=K("j1"),
+                      help="Your situation today. 'Typical' = today's mix for people of your "
+                           "age and degree (students excluded)." + mix_help)
+    j2 = c2.selectbox("P2 now", job_opts, format_func=job_lbl.get, key=K("j2"))
+    pn1 = c1.number_input(f"P1 gross pay now ({cd.currency}/month)", 0.0, 1e6, 0.0, 100.0,
+                          key=K("pn1"), disabled=j1 == "U",
+                          help="Optional (0 = typical). Before tax, all jobs. Sets where you "
+                               "are in the pay distribution for your situation, age and "
+                               "degree; you keep that place as you move on.")
+    pn2 = c2.number_input(f"P2 gross pay now ({cd.currency}/month)", 0.0, 1e6, 0.0, 100.0,
+                          key=K("pn2"), disabled=j2 == "U")
+    career_on = CAR is not None and st.checkbox(
+        "Careers follow today's job market", True,
+        help="Each year a partner can be full time in a job that needs a degree, full time "
+             "in one that doesn't, part time, or looking for work. The model starts from "
+             "today's mix for your age and degree (or your situation), moves it on with the "
+             "year-on-year moves people of your age and degree make now (the same CPS "
+             "households a year apart; switches between the two kinds of full-time job "
+             "calibrated to Strada / Burning Glass: 73% of graduates who start "
+             "underemployed still are 10 years later), and pays each situation what it "
+             "pays now. Raises: what workers of each age get now (the same workers a year "
+             "apart) beyond economy-wide wage growth. Off: full-time earnings by age.")
+    jm = st.radio("Job market ahead", ["Stays as it is now", "Keeps changing as in the last "
+                                       "year (5 more years)"], disabled=not career_on,
+                  help="Keeps changing: the change in year-on-year moves between the prior "
+                       "12 months and the last 12 continues for 5 more years, then holds.")
     edu_pay = st.checkbox("Pay follows the degree", True, disabled=not (d1 or d2),
                           help="On: earnings = the country's age profile for all workers x "
                                "the full-time pay of that degree relative to all degrees, by "
                                "age (e.g. a bachelor's in the US ~1.3x at 25-34). Off: the "
                                "all-degree profile (use the income percentile instead).")
-    g1 = c1.slider("P1 career growth", 0.0, 2.0, 1.0, 0.1,
+    g1 = c1.slider("P1 career growth", 0.0, 2.0, 1.0, 0.1, disabled=bool(career_on),
                    help="1.0 = follow the country's age-earnings profile (cross-section of "
-                        "today's workers by age). 0 = flat career; 2 = twice as steep.")
-    g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1)
+                        "today's workers by age). 0 = flat career; 2 = twice as steep. (Not "
+                        "used when careers follow today's job market.)")
+    g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1, disabled=bool(career_on))
     ra = cd.retirement_age
     retire_d = int(round(ra.value)) if ra is not None else 67
     retire = st.slider("Retirement age (pay stops, pension starts)", 50, 80, retire_d,
@@ -159,8 +198,12 @@ with sb.expander("👫 Partners & career", expanded=True):
                              "indexed to prices; savings are drawn down slowly.")
     savings0 = st.number_input(f"Current savings ({cd.currency})", 0.0, 1e9, 0.0, 1000.0,
                                key=K("sav0"))
-    st.caption(f"Earnings: {cd.earnings_src.label}{flag(cd.earnings_src)}. "
-               f"{cd.earnings_src.note[:160]}")
+    if career_on:
+        st.caption(f"Careers: CPS microdata {CAR.window} (Census API) - situations, pay, "
+                   "year-on-year moves and raises for your age and degree.")
+    else:
+        st.caption(f"Earnings: {cd.earnings_src.label}{flag(cd.earnings_src)}. "
+                   f"{cd.earnings_src.note[:160]}")
 
 with sb.expander("💍 Marriage & kids"):
     married = st.checkbox("Get married", True)
@@ -245,7 +288,8 @@ with sb.expander("🏡 Housing"):
                             f"{L.get('home_ins_pct', 0):g}% home insurance.")
     h_opts = ["With incomes", "Recent trend (10 yrs)", "Custom"]
     ht, rt = cd.home_trend, cd.rent_trend
-    h_out = st.radio("House prices & rents", h_opts, horizontal=True, key=K("hout"),
+    h_out = st.radio("House prices & rents", h_opts, index=1 if (ht or rt) else 0,
+                     horizontal=True, key=K("hout"),
                      help="With incomes: prices and rents grow with real wages (constant "
                           "price-to-income, the long-run norm). Recent trend: the last ~20 "
                           "years' real growth continues for 10 years, then with incomes"
@@ -344,15 +388,19 @@ with sb.expander("🧾 Other costs & options"):
                            " / theirs, both growing with average wages)^this. 0 = always "
                            "the survey average; 1 = proportional. 0.8 matches how saving "
                            "rates rise with age in Eurostat's saving-by-age data.")
-    surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, 0.0, 0.05,
+    surv_d = 0.5 if cd.budget_coverage_measured else 0.0
+    surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, surv_d, 0.05,
+                     key=K("surv"),
                      help="Household budget surveys record less than national accounts "
-                          "(e.g. food ~80%, restaurants and alcohol about half; Eurostat, by "
-                          "country; outside the EU the EU median). 1 = scale each category "
-                          "up to the national-accounts level; 0 = raw survey (default). Part "
-                          "of the gap is the very rich and the informal economy, whose "
-                          "income the model doesn't include either. 0.5 matches how many "
-                          "couples report struggling to make ends meet a little better, but "
-                          "makes buying implausibly hard in e.g. the UK.")
+                          "(e.g. food ~65-80%, clothes, alcohol and eating out about half; "
+                          "Eurostat budget surveys vs national accounts, US Consumer "
+                          "Expenditure Survey vs BEA consumption). 1 = scale each category up "
+                          "to the national-accounts level; 0 = raw survey. Part of the gap is "
+                          "the very rich, non-profits and the informal economy, so the "
+                          "default adds back half of it where this country's gap is "
+                          "measured (it matches how many couples report struggling to make "
+                          "ends meet best), and none where it would only be estimated "
+                          "(e.g. the UK).")
 
 with sb.expander("👪 Family help & later life"):
     c1, c2 = st.columns(2)
@@ -439,13 +487,30 @@ with sb.expander("📈 Returns, growth & display"):
     dep_r = c2.number_input("Bank deposits %/yr", 0.0, 10.0, depr_d, 0.05, key=K("depr"),
                             disabled=hold == "Invest everything",
                             help=D_["deposit_return"]["source"])
-    infl_d = float(R_.get("inflation_target", 2.0))
-    infl = c1.number_input("Inflation %/yr", -2.0, 15.0, infl_d, 0.1, key=K("infl"),
-                           help=src(cd.inflation_hist, "{:.2f}") +
-                           f" Default {infl_d:g}% (central-bank target).")
+    infl_d = round(float(D_["inflation"]["value"]), 2)
+    near_i = D_.get("inflation_next_5y")
+    infl = c1.number_input("Inflation %/yr" + (" (after 5 years)" if near_i else ""), -2.0,
+                           15.0, infl_d, 0.1, key=K("infl"),
+                           help=D_["inflation"]["source"] + (
+                               f". Next 5 years: {near_i['value']:.2f}% ({near_i['source']})."
+                               " Changing this sets one rate for all years."
+                               if near_i else ""))
+    pt_ = cd.price_trends or {}
+    costs_out = st.radio("Costs ahead", ["Each cost's recent trend", "All rise with prices"],
+                         horizontal=True, disabled=not pt_,
+                         help="Recent trend: each budget line's price trend relative to all "
+                              "prices over the last 10 years continues for the next 10 "
+                              "(HICP by category in Europe, CPI components in the US), "
+                              "then moves with prices and incomes like the rest. Costs that "
+                              "already rise with wages (childcare, health premiums, cars) "
+                              "only take the part beyond wage growth." + (
+                                  " Here: " + ", ".join(
+                                      f"{k.replace('_', ' ')} {v[0]:+.1f}%/yr"
+                                      for k, v in sorted(pt_.items(), key=lambda x: -x[1][0])
+                                      [:6]) + "." if pt_ else ""))
     wt = cd.wage_trend
     w_out = st.radio("Wage growth outlook", ["Official projection", "Recent 20-year trend"],
-                     horizontal=True, disabled=wt is None,
+                     index=1 if wt is not None else 0, horizontal=True, disabled=wt is None,
                      help="Official projection: long-run productivity growth assumed by the EC "
                           "Ageing Report / OBR / CBO / PBO (expert forecasts that include "
                           "convergence of poorer countries). Trend: the last ~20 years of "
@@ -480,9 +545,14 @@ def build_plan(iso3: str, override: bool) -> Plan:
     ppp_f = 1.0 if override else \
         ds.country(iso3).lcu_per_intl.value / cd.lcu_per_intl.value
     p = Plan(
-        country=iso3, earners=(Earner(int(a1), p1, g1, education=d1),
-                               Earner(int(a2), p2, g2, education=d2)),
-        education_pay=edu_pay,
+        country=iso3, earners=(
+            Earner(int(a1), p1, g1, education=d1, job=j1,
+                   pay_now=float(pn1) if override and pn1 > 0 and j1 != "U" else None),
+            Earner(int(a2), p2, g2, education=d2, job=j2,
+                   pay_now=float(pn2) if override and pn2 > 0 and j2 != "U" else None)),
+        education_pay=edu_pay, career_model=bool(career_on) or CAR is None,
+        job_market="trend" if jm.startswith("Keeps") else "now",
+        price_outlook="trend" if costs_out.startswith("Each") else "flat",
         horizon_age=int(horizon) if override and int(horizon) != horizon_d else None,
         retirement_age=int(retire) if override and int(retire) != retire_d else None,
         equity_share=None if hold == "Like typical households" else eq,
@@ -509,7 +579,7 @@ def build_plan(iso3: str, override: bool) -> Plan:
         student_loan_rate=float(sl_rate) if override and abs(sl_rate - slr_d) > 1e-9
         else None, student_loan_years=int(sl_years) if int(sl_years) != 10 else None,
         budget_elasticity=elast, state=state if iso3 == "USA" else None,
-        survey_correction=surv, child_penalty=work_mode == "Country typical",
+        survey_correction=surv if abs(surv - surv_d) > 1e-9 else None, child_penalty=work_mode == "Country typical",
         child_dependent_to=int(home_to) if override and int(home_to) != max(home_d, 18)
         else None,
         budget_scale=budget_scale, emergency_fund_months=efund, job_loss=jl,

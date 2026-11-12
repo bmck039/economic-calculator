@@ -140,10 +140,14 @@ Things no statistics API publishes comparably. Every value has a source and a qu
 
 ## Model in one paragraph
 
-Each partner's gross pay follows the country's (or US state's) cross-sectional age-earnings
+In the US, each partner's career follows today's job market (see "US careers" below):
+today's mix of full-time graduate-level jobs, other full-time jobs, part-time work and job
+search for their age and degree, moved on by the year-on-year moves and raises people make
+now (CPS microdata). Elsewhere, gross pay follows the country's cross-sectional age-earnings
 profile at the chosen percentile, times the full-time pay of their degree relative to all
-degrees at that age (OECD Education at a Glance, if a degree is chosen), plus long-run real
-wage growth and inflation. Taxes use the
+degrees at that age (OECD Education at a Glance, if a degree is chosen). Either way, a
+stated current pay sets the starting level, and economy-wide real wage growth and inflation
+come on top. Taxes use the
 local average tax-rate curve with joint taxation where it exists (DE/LU/PT/PL splitting, FR
 quotient familial), youth exemptions (PL, HU, HR, PT, GR) and compulsory occupational pension
 contributions (CH, NL, DK, IS, LI); US residents get federal + state + local tax and FICA,
@@ -171,6 +175,24 @@ to half by retirement. From the
 retirement age for today's young workers, each partner gets a pension (career-average pay
 relative to the average wage × the OECD replacement rate at that pay), indexed to prices, and
 the couple draws savings down slowly until the longer-living partner's projected lifespan.
+
+## US careers: today's job market, not full-time averages
+
+Full-time median pay overstates what people starting out now earn: among US bachelor's
+holders aged 20-24 who work or look for work (students excluded), only about half are in
+full-time graduate-level jobs. The US model therefore tracks four situations per partner -
+full time in a job that needs a degree (management, business, financial, professional, and
+the sales/office jobs ISCO puts with them), full time in another job, part time (< 35 usual
+hours), and looking for work (incl. discouraged workers) - all from the last 12 months of
+CPS basic monthly microdata (Census API):
+
+| Piece | How | Data |
+|---|---|---|
+| Starting point | Today's mix for the partner's age band and degree, or the situation they enter ("P1 now") | CPS composite weights, 5-year age bands |
+| Pay in each situation | Usual weekly earnings × 52 / 12 at the partner's percentile (or where their stated pay sits); a stated pay fades toward the chosen percentile (ranks correlate ~0.6 over 10 years, Kopczuk-Saez-Song 2010) | CPS outgoing rotation groups |
+| Moves between situations | The same households matched one year apart (months in sample 1-4 → 5-8), by age group and degree. Occupation is coded afresh each year, so switches between graduate and other jobs are scaled to measured persistence: 73% of graduates who start underemployed still are 10 years later vs ~21% of those who start in college-level jobs (Strada / Burning Glass, *Talent Disrupted*, 2024) | CPS matched panels |
+| Raises | The same workers' median pay change over a year (staying in the same situation), by age and degree, beyond economy-wide wage growth (average hourly earnings) | CPS months 4 → 8, BLS CES |
+| Job market ahead | "Stays as it is now" (today's moves continue) or "keeps changing": the change between the prior 12 months and the last 12 continues for 5 years | CPS |
 
 ## Job market by age and degree
 
@@ -207,7 +229,9 @@ labour force where few teenagers work.
 
 | Table | What | Source |
 |---|---|---|
-| `budget_coverage.csv` | National-accounts household consumption ÷ survey spending, per category | Eurostat `nama_10_co3_p3`, `hbs_exp_t121`, `lfst_hhnhtych` (non-EU: EU median) |
+| `budget_coverage.csv` | National-accounts household consumption ÷ survey spending, per category | Eurostat `nama_10_co3_p3`, `hbs_exp_t121`, `lfst_hhnhtych`; US: BEA PCE (NIPA 2.4.5) ÷ BLS CE per household (other non-EU: EU median). Default add-back: half the US gap (the CE implies married couples save a third of their income); none in Europe, whose spending was calibrated on Eurostat saving by age with raw surveys |
+| `us_career.csv` | US situations, pay distributions, year-on-year moves and raises by age and degree | CPS basic monthly microdata (Census API), BLS CES |
+| `price_outlook.csv` | Each budget line's price trend vs all prices over 10 years; US market inflation expectations | Eurostat HICP by COICOP, BLS CPI components, FRED T5YIE / T5YIFR |
 | `family.csv` | Mothers' employment × hours vs women without children; average age of leaving home | Eurostat `lfst_hheredch`, `lfst_hhptechi`, `lfsa_ewhun2`, `yth_demo_030`; CPS microdata; StatCan 14-10-0120 |
 | `pensions.csv` | Net replacement rates at 0.5/1/2 × average wage, future retirement age, life expectancy at 65 (now, 2065) | OECD Pensions at a Glance (`DF_PRR`, `DF_PAG`) |
 | `market_index.csv` | Home-price, rent and fuel indices: curated levels are moved to the latest data | Eurostat HPI, HICP; BIS (FRED); NAR, BLS, EIA (FRED) |
@@ -236,9 +260,10 @@ not what people of each age look like today (their careers ran under different c
 | Investment return | 10-year government yield (latest 3 months) + the households' share in shares × 3.5% equity premium − 0.2% fees; stocks fall to half by retirement | OECD `DF_FINMARK`, Eurostat `irt_lt_mcby_m` |
 | Emergency fund / deposits | What banks pay households now: overnight deposits; deposits = overnight and fixed-term weighted by households' holdings. Elsewhere the 3-month rate × the median pass-through | ECB MIR (households), FDIC national rates via FRED |
 | Rate after the fixed period | Today's mortgage rate + (10-year yield − 0.5 term premium − 3-month rate): the move in short rates the market expects | as above + ECB MIR, SSB, SNB, BoE, FRED |
-| Inflation | Central-bank target | statutory |
-| Wage growth | Official long-run projections, or the last 20 years' real trend | EC Ageing Report / OBR / CBO / PBO; OECD / Eurostat average wages |
-| House prices and rents | With incomes, or the last 20 years' real trend for 10 years | Eurostat HPI and HICP rents, BIS, FRED |
+| Inflation | US: what bond markets expect - 5-year breakeven for the next 5 years, then the 5-year-forward rate. Elsewhere the central-bank target | FRED T5YIE, T5YIFR; statutory |
+| Costs | Each budget line's price trend relative to all prices over the last 10 years continues for 10 years (costs that already rise with wages - childcare, health premiums, cars - only take the part beyond); or all with prices | Eurostat HICP by COICOP; BLS CPI components |
+| Wage growth | The last 20 years' real trend (default), or official long-run projections | OECD / Eurostat average wages; EC Ageing Report / OBR / CBO / PBO |
+| House prices and rents | The last 20 years' real trend for 10 years, then with incomes (default); or with incomes throughout | Eurostat HPI and HICP rents, BIS (incl. US), FRED |
 | University (optional) | Household payments to tertiary institutions per full-time student | OECD Education at a Glance `DF_UOE_FIN_INDIC_SOURCE_NATURE` |
 | Student debt | Default: borrowers' average by degree (US, UK, Canada); amount, rate and term editable. Rate: US 6.52% (2026-27 federal undergraduate), England RPI (Plan 5, 9% above GBP 25,000), Canada 0% (federal), elsewhere the 10-year yield | `params/student_debt.csv`: College Board, Student Loans Company, StatCan NGS; FSA |
 
@@ -251,6 +276,8 @@ the main parent (Kleven, Landais & Søgaard 2019) and years of paid long-term ca
 
 ## Known limitations
 
+* Careers from today's job market are US-only (CPS); elsewhere pay follows full-time earnings by age with the unemployment rate for the age and degree. The CPS pools both sexes and parents with non-parents (the child-penalty module adjusts the main parent).
+* Starting wealth and home ownership are inputs: starting at 35 with no savings is not a typical 35-year-old.
 * Labour-market rates are national: US states use the national rates. Pay by degree is a
   national average gap (field of study, which matters as much, is not modelled).
 * Several rents, home prices, car costs and wedding costs are estimates (quality C); edit

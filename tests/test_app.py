@@ -89,5 +89,14 @@ def test_app_outlook_and_life_factors(country):
     _w(at, "number_input", "Interest %/yr").set_value(5.0).run()
     _w(at, "number_input", "Repaid over").set_value(20).run()
     _w(at, "radio", "How we hold our savings").set_value("Invest everything").run()
+    if country == "United States":
+        _w(at, "selectbox", "P1 now").set_value("PT").run()
+        _w(at, "number_input", "P1 gross pay now").set_value(1200.0).run()
+        _w(at, "selectbox", "P2 now").set_value("FT_nongrad").run()
+        _w(at, "number_input", "P2 gross pay now").set_value(3000.0).run()
+        _w(at, "radio", "Job market ahead").set_value(
+            "Keeps changing as in the last year (5 more years)").run()
+        _w(at, "radio", "Costs ahead").set_value("All rise with prices").run()
+        _w(at, "checkbox", "Careers follow today's job market").set_value(False).run()
     assert not at.exception, at.exception
     assert any(m.label.startswith("Net worth at retirement") for m in at.metric)
