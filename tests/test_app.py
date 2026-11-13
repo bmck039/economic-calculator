@@ -102,6 +102,7 @@ def test_app_outlook_and_life_factors(country):
     assert any(m.label.startswith("Net worth at retirement") for m in at.metric)
 
 
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
 @pytest.mark.parametrize("country", ["United States", "Germany"])
 def test_app_generations_wealth_and_own_inflation(country):
     at = AppTest.from_file(APP, default_timeout=90)
