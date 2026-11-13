@@ -183,7 +183,17 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #      households split financial savings between deposits, bonds and shares: OECD).
 #   9: us_career (CPS: situations, pay, year-on-year moves and raises by age and degree),
 #      price_outlook (relative price trends by budget line; US market inflation outlook).
-DATA_VERSION = "9"
+#  10: cohort (statistics by age x survey year for following cohorts: CPS ASEC, SCF, LFS,
+#      SES), start_wealth (what US families of each age hold now: SCF), household cost
+#      index (US: what households pay, incl. market rents and mortgage interest),
+#      us_history + scf_households (backtests), part_time (EU LFS), typical household
+#      portfolios (ECB DWA, SCF), spending_level (calibrated per country).
+#  11: SCF waves in their own year's dollars (the Fed states all in the latest survey's),
+#      scf_tables (the SCF in the HFCS layout), hfcs_tables (ECB HFCS statistical tables
+#      2010-2021, compiled from the PDFs: reference/hfcs_tables.csv), eu_history (European
+#      prices, wages, home prices, rents, rates, returns, unemployment), euro-area starting
+#      wealth by age (HFCS), BIS house prices for Greece.
+DATA_VERSION = "11"
 
 # ==========================================================================
 # Comparability notes
@@ -2054,6 +2064,652 @@ def career_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                  source="Census/BLS CPS microdata (Census API)")
 
 
+# ==========================================================================
+# COHORTS: the same birth years followed across many years of surveys
+# ==========================================================================
+# Each statistic is computed by single year of age (a 5-year window centred on it, so
+# small cells are not noise) and education, for every survey year, plus the all-ages
+# reference (25-64) of that year. econsim/cohort.py turns these into how each cohort
+# compares with the cohorts before it at the same age, and how much of that gap has
+# lasted historically.
+ASEC = "https://api.census.gov/data/{y}/cps/asec/mar"
+ASEC_VARS = "A_AGE,A_HGA,MARSUPWT,PEARNVAL,WKSWORK,HRSWK,A_LFSR,A_ENRLW,A_FTPT,H_TENURE," \
+            "HTOTVAL,A_EXPRRP"
+ASEC_FIRST = 2003                 # earliest March supplement on the Census API
+COHORT_AGES = (18, 79)
+# A_HGA: 31-38 below high school, 39 high school, 40 some college, 41-42 associate,
+# 43 bachelor's, 44-46 master's / professional / doctorate
+ASEC_EDU = {"all": None, "degree": (43, 46), "no_degree": (31, 40),
+            "below_upper_secondary": (31, 38), "upper_secondary": (39, 40),
+            "short_tertiary": (41, 42), "bachelor": (43, 43), "master_plus": (44, 46)}
+COHORT_HALF_WINDOW = 2
+
+
+def _by_age(age: np.ndarray, *cols) -> dict:
+    """age -> tuple of column arrays for that age (for fast moving windows)."""
+    o = np.argsort(age, kind="stable")
+    a = age[o]
+    out = {}
+    for v in np.unique(a):
+        lo, hi = np.searchsorted(a, v), np.searchsorted(a, v, side="right")
+        out[int(v)] = tuple(c[o][lo:hi] for c in cols)
+    return out
+
+
+def _window(groups: dict, a: int, h: int) -> tuple:
+    parts = [groups[x] for x in range(a - h, a + h + 1) if x in groups]
+    if not parts:
+        return None
+    return tuple(np.concatenate([p[i] for p in parts]) for i in range(len(parts[0])))
+
+
+def _wmed(x: np.ndarray, w: np.ndarray) -> float:
+    if len(x) == 0 or w.sum() <= 0:
+        return float("nan")
+    o = np.argsort(x)
+    c = np.cumsum(w[o])
+    return float(x[o][min(np.searchsorted(c, c[-1] / 2), len(x) - 1)])
+
+
+def _wtlog(x: np.ndarray, w: np.ndarray, lo: float = 0.1, hi: float = 0.9) -> float:
+    """Geometric mean of the middle 80% (weighted): a typical level that, unlike the
+    median, does not jump between the round numbers people report."""
+    m = x > 0
+    x, w = x[m], w[m]
+    if len(x) < 10 or w.sum() <= 0:
+        return float("nan")
+    o = np.argsort(x)
+    x, w = x[o], w[o]
+    c = np.cumsum(w) / w.sum()
+    k = (c >= lo) & (c <= hi)
+    if k.sum() < 5:
+        return float("nan")
+    return float(np.exp(np.average(np.log(x[k]), weights=w[k])))
+
+
+def _wshare(m: np.ndarray, w: np.ndarray) -> float:
+    return float((w * m).sum() / w.sum()) if w.sum() > 0 else float("nan")
+
+
+def _asec_year(f: CachedFetcher, y: int) -> pd.DataFrame | None:
+    key = os.environ.get("CENSUS_API_KEY")
+    if not key:
+        raise FetchError("CPS ASEC needs CENSUS_API_KEY")
+    try:
+        d = census_table(f.get(ASEC.format(y=y), {"get": ASEC_VARS, "A_AGE": "18:79",
+                                                  "key": key},
+                               label=f"census:asec:{y}", validate=is_json, timeout=300))
+    except FetchError as e:
+        if any(s in str(e) for s in ("HTTP 404", "HTTP 204", "unexpected response")):
+            return None
+        raise
+    return d
+
+
+def census_table(body: bytes) -> pd.DataFrame:
+    """Census API JSON (an array of arrays of strings) -> numeric DataFrame, through the
+    C CSV parser (json.loads + to_numeric takes ~10x longer on 100k-row files)."""
+    t = body.replace(b"[", b"").replace(b"]", b"").replace(b'"', b"")
+    d = pd.read_csv(io.BytesIO(t), na_values=["null"], skipinitialspace=True,
+                    skip_blank_lines=True)
+    d = d.loc[:, [c for c in d.columns if not str(c).startswith("Unnamed")]]
+    d.columns = [re.sub(r"\.\d+$", "", str(c)) for c in d.columns]
+    return d.loc[:, ~d.columns.duplicated()].apply(pd.to_numeric, errors="coerce")
+
+
+def cohort_us_asec(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """CPS Annual Social and Economic Supplement (March), every year since 2003, by single
+    year of age and education: typical earnings of earners (last calendar year; geometric
+    mean of the middle 80%), the same for full-time year-round workers, share working full time year-round, the
+    unemployment rate in March, householders' home-ownership rate and household income."""
+    rows = []
+    for y in range(ASEC_FIRST, datetime.now().year + 1):
+        d = _asec_year(f, y)
+        if d is None or d.empty:
+            continue
+        age = d["A_AGE"].to_numpy(int)
+        w = d["MARSUPWT"].fillna(0).to_numpy(float)
+        earn = d["PEARNVAL"].fillna(0).to_numpy(float)
+        ft_student = ((d["A_ENRLW"] == 1) & (d["A_FTPT"] == 1)).to_numpy()
+        ftyr = ((d["WKSWORK"] >= 50) & (d["HRSWK"] >= 35)).to_numpy()
+        lf = d["A_LFSR"].isin([1, 2, 3, 4]).to_numpy()
+        une = d["A_LFSR"].isin([3, 4]).to_numpy()
+        head = d["A_EXPRRP"].isin([1, 2]).to_numpy()
+        own = (d["H_TENURE"] == 1).to_numpy()
+        hinc = d["HTOTVAL"].fillna(0).to_numpy(float)
+        hga = d["A_HGA"].to_numpy(int)
+
+        def stats(ix: np.ndarray) -> dict:
+            ww = w[ix]
+            ok = ~ft_student[ix]
+            e, ft = earn[ix], ftyr[ix]
+            m_e, m_ft = ok & (e > 0), ft & (e > 0)
+            m_lf, m_h = lf[ix] & ok, head[ix]
+            return {"earn": (_wtlog(e[m_e], ww[m_e]), int(m_e.sum())),
+                    "earn_ftyr": (_wtlog(e[m_ft], ww[m_ft]), int(m_ft.sum())),
+                    "ftyr_share": (_wshare(ft[ok], ww[ok]), int(ok.sum())),
+                    "unemp": (_wshare(une[ix][m_lf], ww[m_lf]), int(m_lf.sum())),
+                    "own": (_wshare(own[ix][m_h], ww[m_h]), int(m_h.sum())),
+                    "hh_income": (_wtlog(hinc[ix][m_h], ww[m_h]), int(m_h.sum()))}
+
+        ref = stats(np.flatnonzero((age >= 25) & (age <= 64)))
+        for k, (v, n) in ref.items():
+            rows.append({"period": str(y), "statistic": k, "age_band": "ref",
+                         "category": "all", "value": v, "method": f"n={n}"})
+        idx = np.arange(len(d))
+        for edu, rng in ASEC_EDU.items():
+            m = np.ones(len(d), bool) if rng is None else (hga >= rng[0]) & (hga <= rng[1])
+            g = _by_age(age[m], idx[m])
+            for a in range(COHORT_AGES[0], COHORT_AGES[1] + 1):
+                win = _window(g, a, COHORT_HALF_WINDOW)
+                if win is None:
+                    continue
+                for k, (v, n) in stats(win[0]).items():
+                    if n >= 30 and v == v:
+                        rows.append({"period": str(y), "statistic": k, "age_band": str(a),
+                                     "category": edu, "value": v, "method": f"n={n}"})
+    if not rows:
+        raise FetchError("CPS ASEC: no years fetched")
+    out = pd.DataFrame(rows).assign(iso3="USA", series="CPS ASEC")
+    return frame(out, measure="cohort", frequency="A", unit="USD / share",
+                 source="Census CPS ASEC microdata (Census API)",
+                 comparability_note="Earnings refer to the previous calendar year; status "
+                 "(unemployment, home ownership) to March. 5-year age windows.")
+
+
+SCF_ZIP = "https://www.federalreserve.gov/econres/files/scfp{y}excel.zip"
+SCF_COLS = ["YY1", "XX1", "Y1", "WGT", "AGE", "EDCL", "MARRIED", "KIDS", "LF", "NETWORTH", "FIN", "LIQ",
+            "RETQLIQ", "HOUSES", "MRTHEL", "EDN_INST", "INCOME", "WAGEINC", "EQUITY", "DEBT",
+            "HDEBT"]
+SCF_EDU = {"all": None, "degree": (4, 4), "no_degree": (1, 3)}
+SCF_HALF_WINDOW = 3
+
+
+def cohort_us_scf(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Survey of Consumer Finances summary extract (every 3 years since 1989), by age of
+    the family head and education: median net worth, financial assets, home ownership;
+    and for the latest survey, what families of each age hold now (renters' financial
+    assets and retirement accounts, owners' home value and mortgage, student debt)."""
+    rows = []
+    first, last = 1989, datetime.now().year
+    years = [y for y in range(first, last + 1, 3)]
+    got = []
+    for y in years:
+        try:
+            b = f.get(SCF_ZIP.format(y=y), label=f"fed:scf:{y}", validate=is_zip,
+                      timeout=300)
+        except FetchError as e:
+            if "HTTP 404" in str(e):
+                continue
+            raise
+        z = zipfile.ZipFile(io.BytesIO(b))
+        name = next(n for n in z.namelist() if n.lower().endswith(".csv"))
+        d = pd.read_csv(z.open(name), usecols=lambda c: c.upper() in SCF_COLS)
+        d.columns = [c.upper() for c in d.columns]
+        got.append((y, d))
+    if not got:
+        raise FetchError("SCF: no surveys fetched")
+    latest_y = got[-1][0]
+    for y, d in got:
+        age = d["AGE"].to_numpy(int)
+        w = d["WGT"].to_numpy(float)
+        edcl = d["EDCL"].to_numpy(int)
+        couple = (d["MARRIED"] == 1).to_numpy()
+        nw, fin = d["NETWORTH"].to_numpy(float), d["FIN"].to_numpy(float)
+        houses = d["HOUSES"].to_numpy(float)
+        owner = houses > 0
+        ret = d["RETQLIQ"].to_numpy(float) if "RETQLIQ" in d else np.zeros(len(d))
+        mort = d["MRTHEL"].to_numpy(float) if "MRTHEL" in d else np.zeros(len(d))
+        edn = d["EDN_INST"].to_numpy(float) if "EDN_INST" in d else np.zeros(len(d))
+
+        def stats(ix: np.ndarray, detail: bool) -> dict:
+            ww = w[ix]
+            n = len(ix) // 5
+            o = {"networth": (_wmed(nw[ix], ww), n), "fin_assets": (_wmed(fin[ix], ww), n),
+                 "scf_own": (_wshare(owner[ix], ww), n)}
+            if detail:
+                r, ow = ix[~owner[ix]], ix[owner[ix]]
+                dh = ix[edn[ix] > 0]
+                o.update({
+                    "renter_fin": (_wmed(fin[r], w[r]), len(r) // 5),
+                    "renter_retirement": (_wmed(ret[r], w[r]), len(r) // 5),
+                    "owner_fin": (_wmed(fin[ow], w[ow]), len(ow) // 5),
+                    "owner_retirement": (_wmed(ret[ow], w[ow]), len(ow) // 5),
+                    "owner_home": (_wmed(houses[ow], w[ow]), len(ow) // 5),
+                    "owner_mortgage": (_wmed(mort[ow], w[ow]), len(ow) // 5),
+                    "student_debt_share": (_wshare(edn[ix] > 0, ww), n),
+                    "student_debt_holders": (_wmed(edn[dh], w[dh]), len(dh) // 5)})
+            return o
+
+        for k, (v, n) in stats(np.flatnonzero((age >= 25) & (age <= 64)), False).items():
+            rows.append({"period": str(y), "statistic": k, "age_band": "ref",
+                         "category": "all", "household_type": "all", "value": v,
+                         "method": f"n={n}"})
+        idx = np.arange(len(d))
+        for edu, rng in SCF_EDU.items():
+            em = np.ones(len(d), bool) if rng is None else (edcl >= rng[0]) & (edcl <= rng[1])
+            for ht, hm in (("all", np.ones(len(d), bool)), ("couple", couple)):
+                if ht == "couple" and y != latest_y:
+                    continue
+                m = em & hm
+                g = _by_age(age[m], idx[m])
+                for a in range(20, 86):
+                    win = _window(g, a, SCF_HALF_WINDOW)
+                    if win is None:
+                        continue
+                    for k, (v, n) in stats(win[0], y == latest_y).items():
+                        if n >= 30 and v == v:
+                            rows.append({"period": str(y), "statistic": k,
+                                         "age_band": str(a), "category": edu,
+                                         "household_type": ht, "value": v,
+                                         "method": f"n={n}"})
+    # how typical families (bottom 70% by net worth) hold their savings, latest survey
+    y, d = got[-1]
+    if {"LIQ", "EQUITY", "FIN", "NETWORTH"} <= set(d.columns):
+        m = d[d["NETWORTH"] <= _wq(d["NETWORTH"], d["WGT"], [70])[0]]
+        w = m["WGT"]
+        dep = float((m["LIQ"] * w).sum() / (m["FIN"] * w).sum())
+        eq = float((m["EQUITY"] * w).sum() / ((m["FIN"] - m["LIQ"]) * w).sum())
+        typ = pd.DataFrame([{"period": str(y), "statistic": s_, "value": v_,
+                             "method": f"SCF {y}"} for s_, v_ in
+                            (("deposit_share_typical", dep), ("equity_share_typical", eq))])
+        typ = frame(typ.assign(iso3="USA", series="SCF bottom 70%"),
+                    measure="household_assets_typical", frequency="3-yearly", unit="share",
+                    source="Federal Reserve SCF (families in the bottom 70% by net worth)")
+    else:
+        typ = None
+    out = pd.DataFrame(rows).assign(iso3="USA", series="SCF summary extract")
+    res = frame(out, measure="cohort", frequency="3-yearly", unit="USD (survey year)",
+                 source="Federal Reserve Survey of Consumer Finances",
+                 comparability_note="Families by age of the head; 7-year age windows; 5 "
+                 "implicates, weighted. Net worth incl. homes and retirement accounts.")
+    return pd.concat([res, typ], ignore_index=True) if typ is not None else res
+
+
+def _scf_waves(f: CachedFetcher):
+    for y in range(1989, datetime.now().year + 1, 3):
+        try:
+            b = f.get(SCF_ZIP.format(y=y), label=f"fed:scf:{y}", validate=is_zip,
+                      timeout=300)
+        except FetchError as e:
+            if "HTTP 404" in str(e):
+                continue
+            raise
+        z = zipfile.ZipFile(io.BytesIO(b))
+        name = next(n for n in z.namelist() if n.lower().endswith(".csv"))
+        d = pd.read_csv(z.open(name), usecols=lambda c: c.upper() in SCF_COLS)
+        d.columns = [c.upper() for c in d.columns]
+        yield y, d
+
+
+SCF_DOLLARS = ["NETWORTH", "FIN", "LIQ", "RETQLIQ", "HOUSES", "MRTHEL", "EDN_INST", "INCOME",
+               "WAGEINC", "EQUITY", "DEBT", "HDEBT"]
+
+
+def scf_nominal(f: CachedFetcher):
+    """The SCF summary extracts state every wave in dollars of the latest survey (the Fed
+    adjusts them with the CPI-U-RS): yield each wave back in its own year's dollars."""
+    waves = list(_scf_waves(f))
+    if not waves:
+        return
+    base = max(y for y, _ in waves)
+    cpi = _annual(cpi_series(f, US_HISTORY["cpi"]))
+    for y, d in waves:
+        if y in cpi.index and base in cpi.index:
+            k = float(cpi[y] / cpi[base])
+            d = d.copy()
+            for c in SCF_DOLLARS:
+                if c in d:
+                    d[c] = d[c] * k
+        else:
+            log.warning("SCF %s: no CPI to state it in its own dollars", y)
+        yield y, d
+
+
+def scf_households(f: CachedFetcher) -> pd.DataFrame:
+    """scf_households.csv: every SCF couple (married or living together) with the head
+    aged 22-64, first implicate, every wave since 1989, in that year's dollars - the
+    starting points for backtesting the simulation against what the same birth years held
+    in later waves."""
+    out = []
+    for y, d in scf_nominal(f):
+        hid = "YY1" if "YY1" in d else "XX1" if "XX1" in d else None
+        d = d.drop_duplicates(hid) if hid else d             # first implicate
+        d = d[(d["MARRIED"] == 1) & d["AGE"].between(22, 64)]
+        keep = {c.lower(): d[c] for c in SCF_COLS
+                if c in d and c not in ("YY1", "XX1", "Y1", "MARRIED")}
+        out.append(pd.DataFrame(keep).assign(year=y))
+    if not out:
+        raise FetchError("SCF: no waves")
+    t = pd.concat(out, ignore_index=True)
+    t["wgt"] = t["wgt"] * 5              # the first implicate alone carries a fifth
+    return t
+
+
+HFCS_BANDS = {"16-34": (16, 34), "35-44": (35, 44), "45-54": (45, 54), "55-64": (55, 64),
+              "65-74": (65, 74), "75+": (75, 200)}
+
+
+def scf_hfcs_tables(f: CachedFetcher) -> pd.DataFrame:
+    """scf_tables.csv: the SCF (all families, all implicates) in the layout of the ECB's
+    HFCS statistical tables - the same statistics by the same age bands of the reference
+    person, USD thousands - so US and euro-area households are measured alike, and the
+    backtest built on those tables (econsim.backtest_eu) can be checked on the US, where
+    the households themselves are known too."""
+    def wq(x, w, q=0.5):
+        o = np.argsort(x)
+        c = np.cumsum(w[o])
+        return float(x[o][np.searchsorted(c, q * c[-1])]) if len(x) else np.nan
+
+    rows = []
+    for y, d in scf_nominal(f):
+        if y < 1995:
+            continue
+        w = d["WGT"].to_numpy(float)
+        nw, inc = d["NETWORTH"].to_numpy(float), d["INCOME"].to_numpy(float)
+        houses, fin, debt = (d[c].to_numpy(float) for c in ("HOUSES", "FIN", "DEBT"))
+        for band, (lo, hi) in HFCS_BANDS.items():
+            m = d["AGE"].between(lo, hi).to_numpy()
+            if m.sum() < 50:
+                continue
+            ww = w[m]
+            own, has_fin, has_debt = houses[m] > 0, fin[m] > 0, debt[m] > 0
+            for t, ind, v in (
+                    ("A3", "networth_median", wq(nw[m], ww) / 1000),
+                    ("B3", "own_hmr_pct", 100 * np.average(own, weights=ww)),
+                    ("B5", "realestate_median", wq(houses[m][own], ww[own]) / 1000),
+                    ("C4", "financial_median", wq(fin[m][has_fin], ww[has_fin]) / 1000),
+                    ("E5", "has_debt_pct", 100 * np.average(has_debt, weights=ww)),
+                    ("E6", "debt_median", wq(debt[m][has_debt], ww[has_debt]) / 1000),
+                    ("I1", "income_median", wq(inc[m], ww) / 1000)):
+                rows.append({"wave": y, "iso3": "USA", "table": t, "indicator": ind,
+                             "group": "Age of RP", "row": band, "value": round(v, 2),
+                             "se": None})
+        ten = {"Owners - outright": (houses > 0) & (d["MRTHEL"].to_numpy(float) <= 0),
+               "Owners - with mortgage": (houses > 0) & (d["MRTHEL"].to_numpy(float) > 0),
+               "Renters / other": houses <= 0}
+        allf = fin > 0
+        for row, m in list(ten.items()) + [("All", np.ones(len(d), bool))]:
+            mm = m & allf
+            rows.append({"wave": y, "iso3": "USA", "table": "C4",
+                         "indicator": "financial_median",
+                         "group": "Housing status" if row != "All" else "Total population",
+                         "row": row, "value": round(wq(fin[mm], w[mm]) / 1000, 2), "se": None})
+        # fieldwork May-December of the survey year; income: the calendar year before
+        rows += [{"wave": y, "iso3": "USA", "table": "REF", "indicator": ind, "group": "",
+                  "row": "", "value": v, "se": None}
+                 for ind, v in (("fieldwork_mid", y + 0.7), ("income_year_mid", y - 0.5))]
+    if not rows:
+        raise FetchError("SCF: no waves")
+    return pd.DataFrame(rows)
+
+
+# Annual US history for backtests (what actually happened): CPI and its parts, home prices,
+# rents, mortgage and market rates, deposit rates, returns, wages, unemployment.
+US_HISTORY = {"cpi": "CPIAUCSL", "hpi": "CSUSHPISA", "rent": "CUSR0000SEHA",
+              "mortgage30": "MORTGAGE30US", "tbill3m": "TB3MS", "y10": "GS10",
+              "deposit_savings": "SNDR", "wage": "AHETPI", "unemployment": "UNRATE"}
+FF_FACTORS = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/" \
+             "F-F_Research_Data_Factors_CSV.zip"
+
+
+def _annual(d: pd.DataFrame) -> pd.Series:
+    """Monthly (or weekly / daily) FRED values -> calendar-year means; a year counts when
+    at least 11 months are there (October 2025 was not collected: federal shutdown)."""
+    x = pd.Series(pd.to_numeric(d["value"], errors="coerce").to_numpy(),
+                  index=pd.to_datetime(d["date"])).dropna().resample("MS").mean()
+    x = x.interpolate(limit=1, limit_area="inside")
+    n = x.groupby(x.index.year).count()
+    a = x.groupby(x.index.year).mean()
+    return a[n >= 12]
+
+
+FF_EUROPE = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/" \
+            "Europe_3_Factors_CSV.zip"
+
+
+def french_annual(f: CachedFetcher, url: str, label: str) -> dict[int, tuple[float, float]]:
+    """Kenneth French data library: year -> (market minus risk-free, risk-free), % (USD)."""
+    b = f.get(url, label=label, validate=is_zip, timeout=120)
+    z = zipfile.ZipFile(io.BytesIO(b))
+    txt = z.open(z.namelist()[0]).read().decode("latin-1")
+    ann = txt[txt.index("Annual Factors"):]
+    out = {}
+    for line in ann.splitlines()[2:]:
+        p = [x.strip() for x in line.split(",")]
+        if len(p) >= 5 and p[0].isdigit():
+            out[int(p[0])] = (float(p[1]), float(p[4]))
+    return out
+
+
+def history_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """European stock market total returns in USD (Kenneth French data library: developed
+    Europe, value-weighted); converted to each currency in derive_eu_history."""
+    rows = [{"iso3": "EA", "statistic": "equity_return_usd", "period": str(y),
+             "value": mkt + rf, "series": "Kenneth French data library (Europe market)"}
+            for y, (mkt, rf) in french_annual(f, FF_EUROPE, "french:europe3").items()]
+    return frame(pd.DataFrame(rows), measure="history_eu", frequency="A", unit="% per year",
+                 source="Kenneth French data library")
+
+
+def history_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """What US prices, rates, returns and wages did, year by year (FRED; stock market
+    returns from the Kenneth French data library: CRSP value-weighted market)."""
+    rows = []
+    for key, sid in list(US_HISTORY.items()) + [(f"cpi:{k}", v)
+                                                 for k, v in US_CPI_PARTS.items()]:
+        try:
+            a = _annual(cpi_series(f, sid))
+        except FetchError as e:
+            log.warning("history %s skipped: %s", sid, str(e)[:120])
+            continue
+        rows += [{"iso3": "USA", "statistic": key, "period": str(y), "value": v,
+                  "series": f"FRED {sid}"} for y, v in a.items()]
+    for y, (mkt, rf) in french_annual(f, FF_FACTORS, "french:ff3").items():
+        rows.append({"iso3": "USA", "statistic": "equity_return", "period": str(y),
+                     "value": mkt + rf,
+                     "series": "Kenneth French data library (CRSP market)"})
+        rows.append({"iso3": "USA", "statistic": "tbill_return", "period": str(y),
+                     "value": rf, "series": "Kenneth French data library"})
+    return frame(pd.DataFrame(rows), measure="history", frequency="A",
+                 unit="index / % / % per year", source="FRED; Kenneth French data library")
+
+
+def derive_part_time(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """part_time.csv: part-time share of employment by age band and education, latest
+    year (Eurostat LFS)."""
+    d = long[long["measure"] == "part_time_share"].dropna(subset=["value", "year"])
+    d = d.sort_values("year").groupby(["iso3", "age_band", "category"]).tail(1)
+    return pd.DataFrame({"iso3": d["iso3"], "age_band": d["age_band"],
+                         "education": d["category"], "year": d["year"].astype(int),
+                         "value": d["value"], "source": d["source"]}).reset_index(drop=True)
+
+
+def derive_us_history(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    h = long[long["measure"] == "history"].dropna(subset=["value", "year"])
+    return pd.DataFrame({"series": h["statistic"], "year": h["year"].astype(int),
+                         "value": h["value"], "source": h["series"]}) \
+        .sort_values(["series", "year"]).reset_index(drop=True)
+
+
+def _yearly(d: pd.DataFrame, min_months: int = 10) -> pd.Series:
+    """Rows with a period -> calendar-year means (monthly rows: years with enough months)."""
+    d = d.dropna(subset=["value", "year"])
+    if d.empty:
+        return pd.Series(dtype=float)
+    if (d["period"].str.len() > 4).any():
+        n = d.groupby("year")["value"].size()
+        a = d.groupby("year")["value"].mean()
+        return a[n >= min_months].astype(float)
+    return d.groupby("year")["value"].mean().astype(float)
+
+
+def derive_eu_history(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """eu_history.csv: what each European country's prices, wages, home prices, rents,
+    rates, returns and unemployment did, year by year (for backtests against the HFCS):
+    HICP (all items and each budget line's index), OECD average wages (current prices;
+    else Eurostat full-time-adjusted salaries), Eurostat house prices (else BIS), HICP
+    actual rentals, ECB rates on new mortgages, 10-year government bond yields, 3-month
+    interbank rates, ECB household term-deposit rates, Eurostat unemployment, and the
+    European stock market (Kenneth French) in the country's currency (World Bank rates)."""
+    L = long.dropna(subset=["value", "year"])
+    eq = L[(L["measure"] == "history_eu") & (L["statistic"] == "equity_return_usd")]
+    eq = eq.set_index("year")["value"].astype(float)
+    codes = hicp_budget_codes()
+    rows = []
+    for iso in EUROPE:
+        g = L[L["iso3"] == iso]
+        if g.empty:
+            continue
+        out: dict[str, tuple[pd.Series, str]] = {}
+        hicp = g[(g["measure"] == "price_level") & (g["statistic"] == "hicp_index")]
+        hp = hicp.pivot_table(index="year", columns="category", values="value")
+        if "CP00" in hp:
+            out["cpi"] = (hp["CP00"].dropna(), "Eurostat HICP CP00")
+            for k, c in codes.items():
+                if c in hp:
+                    out[f"cpi:{k}"] = (hp[c].dropna(), f"Eurostat HICP {c}")
+            if "CP041" in hp:
+                out["rent"] = (hp["CP041"].dropna(), "Eurostat HICP CP041")
+        w = g[(g["measure"] == "avg_wage") & (g["statistic"] == "mean")]
+        wo = w[w["unit"].astype(str).str.endswith("|V") & ~w["unit"].astype(str)
+               .str.startswith("USD")]
+        we = w[w["series"] == "nama_10_fte"]
+        we = we[we["unit"] == "NAC/year"] if (we["unit"] == "NAC/year").any() else we
+        for d, src in ((wo, "OECD average wages (current prices)"),
+                       (we, "Eurostat nama_10_fte")):
+            if len(d) >= 5:
+                out["wage"] = (_yearly(d), src)
+                break
+        h = g[(g["measure"] == "housing") & (g["statistic"] == "house_price_index")]
+        for ser, src in (("prc_hpi_a", "Eurostat HPI"), (None, "BIS (via FRED)")):
+            d = h[h["series"] == ser] if ser else h[h["series"].astype(str).str.contains(
+                "628BIS", na=False)]
+            if len(d) >= 5:
+                out["hpi"] = (_yearly(d), src)
+                break
+        for key, meas, stat, src in (
+                ("mortgage30", "housing", "mortgage_rate_new_loans", "ECB MIR new mortgages"),
+                ("y10", "interest_rate", "govt_bond_10y", "Eurostat 10-year yields"),
+                ("tbill3m", "interest_rate", "interbank_3m", "Eurostat 3-month rates"),
+                ("deposit_savings", "interest_rate", "deposit_term", "ECB MIR deposits"),
+                ("unemployment", "unemployment_rate", "rate", "Eurostat une_rt")):
+            d = g[(g["measure"] == meas) & (g["statistic"] == stat)]
+            if meas == "unemployment_rate" and (d["series"] == "une_rt_a").any():
+                d = d[d["series"] == "une_rt_a"]
+            a = _yearly(d)
+            if len(a):
+                out[key] = (a, src)
+        if "tbill3m" in out:
+            out["tbill_return"] = out["tbill3m"]
+        # mortgage rates before the series starts (outside the euro: 2018-): the 10-year
+        # yield plus the country's own median spread where both exist
+        if "mortgage30" in out and "y10" in out:
+            m, y = out["mortgage30"][0], out["y10"][0]
+            both = m.index.intersection(y.index)
+            if len(both) >= 3:
+                spread = float((m[both] - y[both]).median())
+                early = y[y.index < m.index.min()] + spread
+                out["mortgage30"] = (pd.concat([early, m]).sort_index(),
+                                     out["mortgage30"][1] + f"; earlier: 10-year yield + "
+                                     f"{spread:.2f} pp (median spread)")
+        fx = g[(g["measure"] == "price_level") & (g["statistic"] == "exchange_rate")]
+        fx = fx.set_index("year")["value"].astype(float).sort_index()
+        if len(eq) and len(fx) >= 2:
+            r = {}
+            for y in eq.index:
+                if y in fx.index and y - 1 in fx.index and fx[y - 1] > 0:
+                    m = fx[y] / fx[y - 1]
+                    if 0.5 < m < 1.5:          # not a currency changeover
+                        r[y] = 100 * ((1 + eq[y] / 100) * m - 1)
+            if r:
+                out["equity_return"] = (pd.Series(r), "Kenneth French Europe market, in "
+                                        "local currency (World Bank exchange rates)")
+        for key, (ser, src) in out.items():
+            rows += [{"iso3": iso, "series": key, "year": int(y), "value": float(v),
+                      "source": src} for y, v in ser.items() if v == v]
+    return pd.DataFrame(rows).sort_values(["iso3", "series", "year"]).reset_index(drop=True) \
+        if rows else pd.DataFrame()
+
+
+HFCS_TABLES = Path(__file__).resolve().parent / "reference" / "hfcs_tables.csv"
+
+
+HFCS_MONEY = ("A3", "B5", "C4", "E6", "I1")       # tables in EUR thousands
+
+
+def hfcs_tables(long: pd.DataFrame | None = None) -> pd.DataFrame:
+    """hfcs_tables.csv: the ECB HFCS statistical tables (waves 2010-2021) by age of the
+    reference person and other breakdowns, as compiled from the ECB's PDFs by
+    tools/hfcs_tables.py (committed in reference/; there is no API for them). Amounts in
+    thousands of the country's own currency (the tables state all in euro: non-euro
+    countries at the fieldwork year's exchange rate, World Bank)."""
+    if not HFCS_TABLES.exists():
+        return pd.DataFrame()
+    t = pd.read_csv(HFCS_TABLES)
+    t["currency"] = "EUR"
+    if long is None:
+        return t
+    fx = long[(long["measure"] == "price_level") & (long["statistic"] == "exchange_rate")]
+    fx = fx.dropna(subset=["year"]).groupby(["iso3", "year"])["value"].mean()
+    ref = t[(t["table"] == "REF") & (t["indicator"] == "fieldwork_mid")] \
+        .set_index(["iso3", "wave"])["value"]
+    for iso in set(t["iso3"]):
+        cur = LOCAL_CURRENCY.get(iso, "EUR")
+        if cur == "EUR":
+            continue
+        for w in set(t.loc[t["iso3"] == iso, "wave"]):
+            yr = int(np.floor(ref.get((iso, w), w)))
+            try:
+                k = float(fx[(iso, yr)] / fx[("DEU", yr)])
+            except KeyError:
+                log.warning("HFCS %s %s: no exchange rate; left out", iso, w)
+                t = t[~((t["iso3"] == iso) & (t["wave"] == w))]
+                continue
+            m = (t["iso3"] == iso) & (t["wave"] == w) & t["table"].isin(HFCS_MONEY)
+            t.loc[m, "value"] *= k
+            t.loc[m, "se"] *= k
+            t.loc[(t["iso3"] == iso) & (t["wave"] == w), "currency"] = cur
+    return t.reset_index(drop=True)
+
+
+def part_time_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Part-time share of employment by age and education (Eurostat LFS lfsa_epgaed: all
+    part-timers, as the US CPS < 35 usual hours, not only those who want more hours)."""
+    df = eurostat(f, "lfsa_epgaed", required={"unit": ["THS_PER"], "sex": ["T"]},
+                  optional={"age": ["Y15-24", "Y25-49", "Y50-64"],
+                            "worktime": ["TOTAL", "PT"], "isced11": list(EDU_EUROSTAT)},
+                  since=max(since or 2015, 2015), geo=EU_GEOS)
+    df = df[df["isced11"].isin(EDU_EUROSTAT)]
+    w = df.pivot_table(index=["iso3", "time", "age", "isced11"], columns="worktime",
+                       values="value", aggfunc="first").reset_index()
+    w = w.dropna(subset=["TOTAL", "PT"])
+    w = w[w["TOTAL"] > 0]
+    out = pd.DataFrame({"iso3": w["iso3"], "period": w["time"],
+                        "value": 100 * w["PT"] / w["TOTAL"],
+                        "age_band": w["age"].map(_age),
+                        "category": w["isced11"].map(EDU_EUROSTAT), "series": "lfsa_epgaed"})
+    return frame(out, measure="part_time_share", statistic="share", frequency="A",
+                 unit="% of employment", source="Eurostat LFS (lfsa_epgaed)")
+
+
+def cohort_eu_lfs(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """Eurostat LFS unemployment by 5-year age band and education, every year since
+    2000 (for following cohorts; the latest year feeds the job market too)."""
+    bands = [f"Y{a}-{a + 4}" for a in range(20, 65, 5)]
+    df = eurostat(f, "lfsa_urgaed", required={"unit": ["PC"], "sex": ["T"]},
+                  optional={"age": bands + ["Y25-64"], "isced11": list(EDU_EUROSTAT)},
+                  since=2000, geo=EU_GEOS)
+    df = df[df["isced11"].isin(EDU_EUROSTAT)]
+    out = pd.DataFrame({"iso3": df["iso3"], "period": df["time"], "value": df["value"],
+                        "age_band": df["age"].map(_age).replace({"25-64": "ref"}),
+                        "category": df["isced11"].map(EDU_EUROSTAT),
+                        "statistic": "unemp", "series": "lfsa_urgaed"})
+    out = out[(out["age_band"] != "ref") | (out["category"] == "all")]
+    return frame(out, measure="cohort", frequency="A", unit="% of labour force",
+                 source="Eurostat LFS (lfsa_urgaed)")
+
+
 def vacancies_europe(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     # The rate code was renamed JOBRATE -> JVR. The query used to "succeed" with 0 rows.
     df = eurostat(f, "jvs_q_nace2",
@@ -2297,16 +2953,43 @@ HICP_CODES = ["CP00", "CP01", "CP011", "CP012", "CP02", "CP03", "CP04", "CP041",
               "CP0723", "CP0724", "CP073", "CP08", "CP09", "CP10", "CP11", "CP12", "CP124",
               "CP125", "CP1252", "CP1253", "CP1254"]
 # US CPI components (FRED, seasonally adjusted where available) for each budget line
+# FRED ids; "BLS:" = only on the BLS public API (car insurance, day care: not on FRED)
 US_CPI_PARTS = {"all": "CPIAUCSL", "groceries": "CUSR0000SAF11",
                 "restaurants_hotels": "CUSR0000SEFV", "alcohol_tobacco": "CUSR0000SAF116",
-                "clothing": "CUSR0000SAA", "furnishings_household": "CUSR0000SAH3",
+                "clothing": "CPIAPPSL", "furnishings_household": "CUSR0000SAH3",
                 "household_operations": "CUSR0000SAH3", "utilities_phone": "CUSR0000SAH2",
-                "health_out_of_pocket": "CUSR0000SAM", "insurance_health": "CUSR0000SAM2",
-                "recreation": "CUSR0000SAR", "education": "CUSR0000SAE1",
-                "transport_services": "CUSR0000SAS4", "personal_misc": "CUSR0000SAG",
+                "health_out_of_pocket": "CPIMEDSL", "insurance_health": "CUSR0000SAM2",
+                "recreation": "CPIRECSL", "education": "CUSR0000SAE1",
+                "transport_services": "CUSR0000SAS4", "personal_misc": "CPIOGSSL",
                 "vehicle_purchase": "CUSR0000SETA02", "vehicle_running": "CUSR0000SETD",
-                "insurance_vehicle": "CUSR0000SETE", "childcare": "CUUR0000SEEB03",
+                "insurance_vehicle": "BLS:CUUR0000SETE", "childcare": "BLS:CUUR0000SEEB03",
                 "rent": "CUSR0000SEHA"}
+BLS_V1 = "https://api.bls.gov/publicAPI/v1/timeseries/data/"
+
+
+def bls_series(f: CachedFetcher, sid: str, first: int = 1995) -> pd.DataFrame:
+    """A BLS series (public API v1, no key: 10 years per request) as date/value."""
+    rows = []
+    last = datetime.now().year
+    for y0 in range(first, last + 1, 10):
+        js = json.loads(f.get(BLS_V1, label=f"bls:{sid}:{y0}", validate=is_json,
+                              timeout=60, method="POST",
+                              json_body={"seriesid": [sid], "startyear": str(y0),
+                                         "endyear": str(min(y0 + 9, last))}))
+        if js.get("status") != "REQUEST_SUCCEEDED":
+            raise FetchError(f"BLS {sid}: {js.get('message')}")
+        for ser in js["Results"]["series"]:
+            for d in ser["data"]:
+                if str(d["period"]).startswith("M") and d["period"] != "M13":
+                    rows.append({"date": f"{d['year']}-{d['period'][1:]}-01",
+                                 "value": d["value"]})
+    if not rows:
+        raise FetchError(f"BLS {sid}: no data")
+    return pd.DataFrame(rows).drop_duplicates("date").sort_values("date")
+
+
+def cpi_series(f: CachedFetcher, sid: str) -> pd.DataFrame:
+    return bls_series(f, sid[4:]) if sid.startswith("BLS:") else fred(f, sid)
 
 
 def hicp_eurostat(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -2326,20 +3009,75 @@ def prices_us_cpi_parts(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     parts = []
     for key, sid in US_CPI_PARTS.items():
         try:
-            d = fred(f, sid)
+            d = cpi_series(f, sid)
         except FetchError as e:
             log.warning("FRED %s skipped: %s", sid, e)
             continue
-        d = d.assign(year=d["date"].str[:4])
-        n = d.groupby("year")["value"].transform("size")
-        a = d[n == 12].groupby("year")["value"].mean().reset_index()
-        parts.append(pd.DataFrame({"iso3": "USA", "period": a["year"], "value": a["value"],
-                                   "category": key, "series": f"FRED {sid}"}))
+        a = _annual(d)      # complete years (one missing month filled)
+        parts.append(pd.DataFrame({"iso3": "USA", "period": a.index.astype(str),
+                                   "value": a.values, "category": key,
+                                   "series": f"FRED {sid}"}))
     if not parts:
         raise FetchError("no US CPI components")
     return frame(pd.concat(parts, ignore_index=True), measure="price_level",
                  statistic="cpi_component", unit="index", frequency="A",
                  source="BLS CPI by component (FRED)")
+
+
+# BLS relative importance of CPI-U components, December 2024 (shares of all items):
+# shelter 35.4 = owners' equivalent rent 26.2 + rent 7.6 + lodging away 1.4 + insurance
+HCI_W = {"ex_shelter": 0.646, "rent": 0.090, "owners": 0.264}
+HCI_RATE_YEARS = 7    # existing loans: the 30-year rate averaged over this many years
+
+
+def household_cost_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """What US households pay, not what the CPI's housing concept says: the CPI less
+    shelter, renters' rents, and for owners what owning costs in interest - home prices x
+    mortgage rates (instead of the CPI's imputed 'owners' equivalent rent'; as the UK's
+    Household Costs Indices, and Bolhuis, Cramer, Schulz & Summers 2024, 'The Cost of
+    Money is Part of the Cost of Living'). Existing loans carry the 30-year rate averaged
+    over 7 years (most owners locked in or refinanced earlier). Weights: BLS relative
+    importance, Dec 2024. Rows: 12-month, 5- and 10-year rates of this index and the CPI."""
+    rd = {}
+    for k, sid in (("cpi", "CPIAUCSL"), ("ex_shelter", "CUSR0000SA0L2"),
+                   ("rent", "CUSR0000SEHA"), ("hpi", "CSUSHPISA"), ("m", "MORTGAGE30US")):
+        d = fred(f, sid)
+        x = pd.Series(pd.to_numeric(d["value"], errors="coerce").to_numpy(),
+                      index=pd.to_datetime(d["date"])).dropna()
+        rd[k] = x.resample("MS").mean()
+    d = pd.concat(rd, axis=1, sort=True)
+    d[["cpi", "ex_shelter", "rent"]] = d[["cpi", "ex_shelter", "rent"]].interpolate(
+        limit=2, limit_area="inside")          # October 2025: not collected (shutdown)
+    d["m_stock"] = d["m"].rolling(12 * HCI_RATE_YEARS, min_periods=12 * 5).mean()
+    d["owners"] = d["hpi"] * d["m_stock"]
+    d = d.dropna(subset=["cpi", "ex_shelter", "rent", "owners"])
+    if len(d) < 12 * 11:
+        raise FetchError("household cost index: too little overlapping history")
+    last = d.index[-1]
+
+    def growth(k: str, months: int) -> float:
+        return float(d[k].iloc[-1] / d[k].iloc[-1 - months])
+
+    rows = []
+    for n, lab in ((1, "12m"), (5, "5y"), (10, "10y")):
+        # chained yearly (same month), the weights reset each year
+        hci = cpi = 1.0
+        for j in range(n):
+            a, b = -1 - 12 * (j + 1), -1 - 12 * j
+            hci *= sum(w * d[k].iloc[b] / d[k].iloc[a] for k, w in HCI_W.items())
+            cpi *= d["cpi"].iloc[b] / d["cpi"].iloc[a]
+        for item, v in (("hci", hci), ("cpi", cpi)):
+            rows.append({"iso3": "USA", "period": str(last.date())[:7],
+                         "category": f"{item}_{lab}",
+                         "value": 100 * (v ** (1 / n) - 1),
+                         "method": "household cost index: CPI less shelter (FRED "
+                         "CUSR0000SA0L2), rent (CUSR0000SEHA), owners' interest = Case-Shiller "
+                         f"(CSUSHPISA) x 30-year rate, {HCI_RATE_YEARS}-year average "
+                         "(MORTGAGE30US); BLS weights Dec 2024" if item == "hci" else
+                         "CPI-U (FRED CPIAUCSL)"})
+    return frame(pd.DataFrame(rows), measure="price_level", statistic="household_cost",
+                 unit="%/yr", frequency="M", source="FRED (BLS, S&P Case-Shiller, "
+                 "Freddie Mac)")
 
 
 def inflation_outlook_us(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -2621,7 +3359,7 @@ def rent_index_eu(f: CachedFetcher, since: int | None) -> pd.DataFrame:
 
 
 BIS_HPI = {"GBR": "QGBN628BIS", "CAN": "QCAN628BIS", "CHE": "QCHN628BIS",
-           "USA": "QUSN628BIS"}
+           "USA": "QUSN628BIS", "GRC": "QGRN628BIS"}
 
 
 def house_prices_bis(f: CachedFetcher, since: int | None) -> pd.DataFrame:
@@ -5483,7 +6221,135 @@ def derive_us_career(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SES_BAND_AGE = {"Y_LT30": 25.0, "Y30-39": 34.5, "Y40-49": 44.5, "Y50-59": 54.5,
+                "Y_GE60": 62.0}
+
+
+START_STATS = ("renter_fin", "renter_retirement", "owner_fin", "owner_retirement",
+               "owner_home", "owner_mortgage", "student_debt_share", "student_debt_holders",
+               "networth", "fin_assets", "scf_own")
+
+
+def start_wealth_hfcs(long: pd.DataFrame) -> pd.DataFrame:
+    """What households of each age hold in each euro-area country (latest HFCS wave), in
+    the layout of the SCF rows: medians by age of the reference person, interpolated
+    between the 10-year age bands; owners' and renters' financial assets from the median
+    of holders and the owner / renter ratio; owners' debt = median debt of debtors x the
+    share of owners in debt. Non-euro currencies at that year's exchange rates."""
+    t = hfcs_tables(long)
+    if t.empty:
+        return pd.DataFrame()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from econsim.backtest_eu import Tables
+    rows = []
+    for iso in sorted(set(t["iso3"]) - {"EA"}):
+        if iso not in COUNTRIES:
+            continue
+        T = Tables(t, iso)
+        if not T.waves:
+            continue
+        w = T.waves[-1]
+        yr = int(np.floor(T.field[w]))
+        k = 1000.0                                   # own currency (hfcs_tables)
+        r_own, r_rent = T.tenure_ratio(w)
+        src = f"ECB HFCS {w} (fieldwork {yr})"
+        for a in range(20, 86):
+            own = T.at("B3", w, a, log=False) / 100
+            fin = T.at("C4", w, a) * k
+            debt = T.at("E6", w, a) * k
+            dsh = T.at("E5", w, a, log=False) / 100
+            vals = {"networth": T.at("A3", w, a) * k, "scf_own": own,
+                    "owner_home": T.at("B5", w, a) * k,
+                    "owner_mortgage": (debt * min(1.0, dsh / own) if own > 0 and
+                                       debt == debt and dsh == dsh else 0.0),
+                    "owner_fin": fin * r_own, "renter_fin": fin * r_rent,
+                    "owner_retirement": 0.0, "renter_retirement": 0.0}
+            rows += [{"iso3": iso, "statistic": st, "education": "all",
+                      "household_type": "all", "age": a, "year": yr, "value": v, "n": None,
+                      "source": src} for st, v in vals.items() if v == v]
+    return pd.DataFrame(rows)
+
+
+def derive_start_wealth(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """start_wealth.csv: what families of each age hold now - US: latest SCF, by
+    education and couple / all families; euro area: latest HFCS wave, all households -
+    the default starting point of a simulation at that age."""
+    c = long[(long["measure"] == "cohort") & long["statistic"].isin(START_STATS) &
+             (long["source"].astype(str).str.contains("Consumer Finances"))]
+    c = c.dropna(subset=["value", "year"])
+    c = c[(c["year"] == c["year"].max()) & c["age_band"].astype(str).str.fullmatch(r"\d+")]
+    us = pd.DataFrame({
+        "iso3": c["iso3"], "statistic": c["statistic"], "education": c["category"],
+        "household_type": c["household_type"].fillna("all"),
+        "age": c["age_band"].astype(int), "year": c["year"].astype(int),
+        "value": c["value"],
+        "n": pd.to_numeric(c["method"].astype(str).str.extract(r"n=(\d+)")[0],
+                           errors="coerce"),
+        "source": c["source"]})
+    return pd.concat([us, start_wealth_hfcs(long)], ignore_index=True)
+
+
+def derive_cohort(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
+    """cohort.csv: each statistic by age, education and survey year with that year's
+    all-ages reference (25-64; SES: all ages), for following cohorts over time.
+    US: CPS ASEC (every year since 2003) and the SCF (every 3 years since 1989).
+    Europe: LFS unemployment by 5-year band (since 2000) and SES median earnings by age
+    band (2006-2022, every 4 years)."""
+    c = long[long["measure"] == "cohort"].dropna(subset=["value", "year"]).copy()
+    c["household_type"] = c["household_type"].fillna("all").astype(str)
+    c = c[(c["household_type"] == "all") &
+          ~c["statistic"].isin([s for s in START_STATS
+                                if s not in ("networth", "fin_assets", "scf_own")])]
+    out = []
+    for (iso, src), g in c.groupby(["iso3", "source"]):
+        ref = g[g["age_band"] == "ref"].set_index(["statistic", "year"])["value"]
+        d = g[g["age_band"] != "ref"].copy()
+        ab = d["age_band"].astype(str)
+        single = ab.str.fullmatch(r"\d+")
+        d["age"] = np.where(single, pd.to_numeric(ab.where(single), errors="coerce"),
+                            ab.str.extract(r"(\d+)-(\d+)").astype(float).mean(axis=1))
+        d["ref"] = [ref.get((s, y), np.nan) for s, y in zip(d["statistic"], d["year"])]
+        d["n"] = pd.to_numeric(d["method"].astype(str).str.extract(r"n=(\d+)")[0],
+                               errors="coerce")
+        out.append(pd.DataFrame({"iso3": iso, "measure": d["statistic"],
+                                 "education": d["category"],
+                                 "household_type": d["household_type"], "age": d["age"],
+                                 "year": d["year"].astype(int), "value": d["value"],
+                                 "ref": d["ref"], "n": d["n"], "source": src,
+                                 "span": np.where(single, 2 * (SCF_HALF_WINDOW if "Consumer"
+                                                               in src else COHORT_HALF_WINDOW)
+                                                  + 1, 10)}))
+    s = long[(long["measure"] == "earnings_by_age") & (long["source"] == "Eurostat SES") &
+             (long["statistic"] == "median") & (long["unit"] == "EUR/month")]
+    s = s.dropna(subset=["value", "year"])
+    if not s.empty:
+        tot = s[s["age_band"] == "TOTAL"].set_index(["iso3", "year"])["value"]
+        b = s[s["age_band"].isin(SES_BAND_AGE)]
+        out.append(pd.DataFrame({
+            "iso3": b["iso3"], "measure": "earn_ses", "education": "all",
+            "household_type": "all", "age": b["age_band"].map(SES_BAND_AGE),
+            "year": b["year"].astype(int), "value": b["value"],
+            "ref": [tot.get((i, y), np.nan) for i, y in zip(b["iso3"], b["year"])],
+            "n": np.nan, "source": "Eurostat SES (median, full and part time)", "span": 20}))
+    if not out:
+        return pd.DataFrame()
+    t = pd.concat(out, ignore_index=True).dropna(subset=["value", "ref", "age"])
+    return t.sort_values(["iso3", "measure", "education", "household_type", "year", "age"]) \
+        .reset_index(drop=True)
+
+
 PRICE_TREND_YEARS = 10
+
+
+def hicp_budget_codes() -> dict[str, str]:
+    """Budget line -> the HICP (COICOP) price index that tracks it."""
+    code_for = {}
+    for code, key in COICOP_CATS.items():          # most specific code wins
+        if code in HICP_CODES and len(code) >= len(code_for.get(key, "")):
+            code_for[key] = code
+    code_for.update({"childcare": "CP124", "phone_internet": "CP08",
+                     "vehicle_running": "CP0723", "rent": "CP041"})
+    return code_for
 
 
 def derive_price_outlook(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
@@ -5493,12 +6359,7 @@ def derive_price_outlook(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     rows = []
     pl = long[long["measure"] == "price_level"].dropna(subset=["year", "value"])
     hicp = pl[pl["statistic"] == "hicp_index"]
-    code_for = {}
-    for code, key in COICOP_CATS.items():          # most specific code wins
-        if code in HICP_CODES and len(code) >= len(code_for.get(key, "")):
-            code_for[key] = code
-    code_for.update({"childcare": "CP124", "phone_internet": "CP08",
-                     "vehicle_running": "CP0723", "rent": "CP041"})
+    code_for = hicp_budget_codes()
     sources = []
     for iso, g in hicp.groupby("iso3"):
         sources.append((iso, g.pivot_table(index="year", columns="category", values="value"),
@@ -5533,12 +6394,62 @@ def derive_price_outlook(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
             rows.append({"iso3": "USA", "item": item, "value": round(float(s_["value"].mean()), 3),
                          "period": str(s_["period"].iloc[-1]),
                          "source": f"{s_['series'].iloc[-1]} (last 3 months)"})
+    hc = long[(long["measure"] == "price_level") &
+              (long["statistic"] == "household_cost")].dropna(subset=["value"])
+    for r in hc.itertuples(index=False):        # items hci_12m, cpi_5y, ...
+        rows.append({"iso3": r.iso3, "item": r.category, "value": round(float(r.value), 3),
+                     "period": str(r.period), "source": str(r.method)})
     return pd.DataFrame(rows)
 
 
 # Danish labour-market pensions are run by life insurers (F62): they are quasi-mandatory
 # pension saving (modelled with the pension), not free savings
 LIFE_INSURANCE_IS_PENSION = {"DNK"}
+
+
+DWA_TYPICAL = ("B50", "D6", "D7")      # the bottom 70% of households by net wealth
+ECB_DWA = "https://data-api.ecb.europa.eu/service/data/DWA"
+
+
+def household_assets_typical_ecb(f: CachedFetcher, since: int | None) -> pd.DataFrame:
+    """How TYPICAL households hold their savings: ECB Distributional Wealth Accounts, the
+    bottom 70% of households by net wealth (the whole sector leans on the wealthiest,
+    who hold far more in shares). Deposits as a share of deposits + bonds + listed shares
+    + funds + life insurance; shares + funds as a share of the rest. Latest quarter."""
+    b = f.get(ECB_DWA, {"format": "csvdata", "detail": "dataonly", "lastNObservations": 1},
+              label="ecb:dwa", timeout=180, validate=lambda x: x[:3] == b"KEY")
+    d = pd.read_csv(io.BytesIO(b))
+    d = d[(d["UNIT_MEASURE"] == "EUR") & (d["STO"] == "LE") & d["DWA_GRP"].isin(DWA_TYPICAL)]
+    rows = []
+    for geo, g in d.groupby("REF_AREA"):
+        iso = ISO2_TO_ISO3.get(geo)
+        if iso is None:
+            continue
+        v = g.groupby("INSTR_ASSET")["OBS_VALUE"].sum()
+        inv = sum(float(v.get(k, 0.0)) for k in ("F3", "F511", "F52", "F62"))
+        dep = float(v.get("F2M", 0.0))
+        if dep + inv <= 0 or inv <= 0:
+            continue
+        per = str(g["TIME_PERIOD"].max())
+        rows += [{"iso3": iso, "period": per[:4], "statistic": "deposit_share_typical",
+                  "value": dep / (dep + inv), "method": per},
+                 {"iso3": iso, "period": per[:4], "statistic": "equity_share_typical",
+                  "value": (float(v.get("F511", 0)) + float(v.get("F52", 0))) / inv,
+                  "method": per}]
+    if not rows:
+        raise FetchError("ECB DWA: nothing parsed")
+    return frame(pd.DataFrame(rows).assign(series="ECB DWA bottom 70%"),
+                 measure="household_assets_typical", frequency="Q", unit="share",
+                 source="ECB Distributional Wealth Accounts (bottom 70% by net wealth)")
+
+
+def _logit(p):
+    p = min(max(float(p), 1e-3), 1 - 1e-3)
+    return math.log(p / (1 - p))
+
+
+def _expit(z):
+    return 1 / (1 + math.exp(-z))
 
 
 def derive_portfolio(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
@@ -5580,6 +6491,26 @@ def derive_portfolio(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     df.loc[gap, "source"] = "EU median (no national balance sheet with deposits and funds)"
     df.loc[gap, "estimated"] = True
     df.loc[gap, "year"] = int(eu["year"].max()) if not eu.empty else None
+    # typical households (bottom 70% by wealth): ECB DWA, US SCF; elsewhere the sector's
+    # shares moved by the median gap (log-odds) between typical and sector where both exist
+    t = long[long["measure"] == "household_assets_typical"].dropna(subset=["value"])
+    typ = {(r.iso3, r.statistic): (float(r.value), str(r.source)) for r in t.itertuples()}
+    for c in ("deposit_share", "equity_share"):
+        gaps = [_logit(typ[(i, c + "_typical")][0]) - _logit(x)
+                for i, x in zip(df["iso3"], df[c]) if (i, c + "_typical") in typ and x == x]
+        shift = float(np.median(gaps)) if gaps else 0.0
+        vals, srcs = [], []
+        for i, x in zip(df["iso3"], df[c]):
+            k = ("CHE" if i == "LIE" else i, c + "_typical")
+            if k in typ:
+                vals.append(round(typ[k][0], 3))
+                srcs.append(typ[k][1])
+            else:
+                vals.append(round(_expit(_logit(x) + shift), 3) if x == x else None)
+                srcs.append(f"household sector (OECD) moved by the median gap of typical "
+                            f"households in {len(gaps)} countries ({shift:+.2f} log-odds)")
+        df[c + "_typical"] = vals
+        df[c + "_typical_source"] = srcs
     return df
 
 
@@ -5745,6 +6676,13 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                    ("StatCan supplementary rates", slack_canada),
                    ("ONS discouraged workers", slack_uk),
                    ("CPS microdata (US)", labour_us_cps), ("CPS careers (US)", career_us_cps),
+                   ("CPS ASEC cohorts (US)", cohort_us_asec),
+                   ("SCF wealth by age (US)", cohort_us_scf),
+                   ("ECB typical household portfolios", household_assets_typical_ecb),
+                   ("US history (prices, rates, returns)", history_us),
+                   ("European stock returns (history)", history_europe),
+                   ("LFS unemployment cohorts (EU)", cohort_eu_lfs),
+                   ("LFS part-time by age and education (EU)", part_time_europe),
                    ("Eurostat JVS", vacancies_europe),
                    ("JOLTS", vacancies_us), ("StatCan JVWS", vacancies_canada),
                    ("ONS vacancies", vacancies_uk)],
@@ -5770,6 +6708,7 @@ MODULES: dict[str, list[tuple[str, Callable]]] = {
                        ("ECB deposit rates", deposit_rates_ecb),
                        ("US CPI components", prices_us_cpi_parts),
                        ("US inflation outlook", inflation_outlook_us),
+                       ("US household cost index", household_cost_us),
                        ("FDIC deposit rates", deposit_rates_us),
                        ("OECD household assets", household_assets_oecd),
                        ("Eurostat energy prices", energy_prices_eu),
@@ -5939,7 +6878,15 @@ def main(argv: list[str] | None = None) -> int:
                      ("university", lambda: derive_university(long, ctx)),
                      ("portfolio", lambda: derive_portfolio(long, ctx)),
                      ("price_outlook", lambda: derive_price_outlook(long, ctx)),
-                     ("us_career", lambda: derive_us_career(long, ctx))]:
+                     ("us_career", lambda: derive_us_career(long, ctx)),
+                     ("cohort", lambda: derive_cohort(long, ctx)),
+                     ("start_wealth", lambda: derive_start_wealth(long, ctx)),
+                     ("us_history", lambda: derive_us_history(long, ctx)),
+                     ("eu_history", lambda: derive_eu_history(long, ctx)),
+                     ("hfcs_tables", lambda: hfcs_tables(long)),
+                     ("scf_tables", lambda: scf_hfcs_tables(f)),
+                     ("part_time", lambda: derive_part_time(long, ctx)),
+                     ("scf_households", lambda: scf_households(f))]:
         derived[name] = timed(name, fn)
     derived["country_snapshot"] = timed("country_snapshot", lambda: derive_snapshot(
         long, ctx, derived["couple_budget"], derived["life_events"], derived["earnings_ppp"]))
@@ -5974,6 +6921,20 @@ def main(argv: list[str] | None = None) -> int:
             write(df, a.out / name)
     pd.DataFrame(f.log_rows).to_csv(a.out / "fetch_log.csv", index=False)
     timings.append(("write CSVs", time.time() - t0))
+    # each country's spending level: the simulated population saves the national rate
+    # (needs the tables just written; econsim.calibrate)
+    t0 = time.time()
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from econsim.calibrate import write_levels
+        lv = write_levels(str(a.out))
+        status.append(("derived", "spending_level", "ok", len(lv), ""))
+    except Exception as e:      # noqa: BLE001 - the app falls back to level 1
+        status.append(("derived", "spending_level", "FAILED", 0,
+                       f"{type(e).__name__}: {str(e)[:200]}"))
+        log.exception("spending level calibration failed")
+    timings.append(("spending levels", time.time() - t0))
+    status_df = pd.DataFrame(status, columns=["module", "source", "status", "rows", "error"])
 
     print("\nTimings (derived steps and writes)")
     for n, t in timings:

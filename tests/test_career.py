@@ -68,7 +68,12 @@ def test_career_starts_from_todays_mix_and_situation():
     assert p.pay[0] / 12 == pytest.approx((0.5 * 5000 + 0.25 * 3500 + 0.15 * 1800) / 0.9)
     pt = career_path(c, 23, "bachelor", 10, job="PT", pay_now=1800 * 0.8)
     assert pt.quantile == pytest.approx(25) and pt.pay[0] / 12 == pytest.approx(1440)
-    assert pt.mix[0]["PT"] == 1.0 and pt.mix[1]["PT"] == pytest.approx(0.45)
+    # the difference to today's mix closes as people move: M + (start - M) @ moves
+    M = np.array([0.5, 0.25, 0.15, 0.10])
+    dev = (np.array([0, 0, 1.0, 0]) - M) @ c.moves(23, "bachelor")
+    assert pt.mix[0]["PT"] == 1.0 and pt.mix[1]["PT"] == pytest.approx(M[2] + dev[2])
+    assert pt.mix[9]["PT"] == pytest.approx(0.15, abs=0.05)      # back toward the mix
+    assert p.mix[5] == pytest.approx(p.mix[0])                   # default: today's mix
 
 
 def test_job_type_switching_is_sticky_and_raises_follow_age():
@@ -112,8 +117,8 @@ def test_inflation_path_and_cost_trends():
     assert r.iloc[20] == pytest.approx(1.02 ** 10, rel=1e-6)
 
 
-def test_survey_gap_default_only_where_measured():
+def test_survey_gap_added_back_in_full_by_default():
     cov = {"groceries": 1.44}
-    a = simulate(plan(), country(budget_coverage=cov, budget_coverage_measured=True)).years
-    b = simulate(plan(), country(budget_coverage=cov, budget_coverage_measured=False)).years
-    assert a["budget:groceries"].iloc[0] == pytest.approx(1.2 * b["budget:groceries"].iloc[0])
+    a = simulate(plan(), country(budget_coverage=cov)).years
+    b = simulate(plan(survey_correction=0.0), country(budget_coverage=cov)).years
+    assert a["budget:groceries"].iloc[0] == pytest.approx(1.44 * b["budget:groceries"].iloc[0])

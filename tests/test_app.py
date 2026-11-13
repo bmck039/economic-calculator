@@ -100,3 +100,16 @@ def test_app_outlook_and_life_factors(country):
         _w(at, "checkbox", "Careers follow today's job market").set_value(False).run()
     assert not at.exception, at.exception
     assert any(m.label.startswith("Net worth at retirement") for m in at.metric)
+
+
+@pytest.mark.parametrize("country", ["United States", "Germany"])
+def test_app_generations_wealth_and_own_inflation(country):
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].set_value(country).run()
+    _w(at, "selectbox", "P1 now").set_value("PT").run()
+    _w(at, "radio", "How far our generation").set_value("full").run()
+    _w(at, "radio", "Today's money means").set_value("own").run()
+    _w(at, "number_input", "Partner 1 age").set_value(45).run()
+    _w(at, "checkbox", "We already own our home").set_value(True).run()
+    assert not at.exception

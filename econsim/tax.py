@@ -73,6 +73,7 @@ class USParams:
     housing_limit: float
     fica_rate: float
     ss_wage_base: float
+    eitc_scale: float = 1.0          # EITC dollar amounts vs 2026 (indexed like the rest)
 
     def indexed(self, f: float) -> "USParams":
         """All dollar amounts scaled by an inflation factor f (IRS indexes yearly)."""
@@ -80,7 +81,24 @@ class USParams:
                         [(r, t * f) for r, t in self.brackets_single],
                         self.std_mfj * f, self.std_single * f, self.ctc, self.ctc_refundable,
                         self.feie * f, self.housing_base * f, self.housing_limit * f,
-                        self.fica_rate, self.ss_wage_base * f)
+                        self.fica_rate, self.ss_wage_base * f, self.eitc_scale * f)
+
+
+# Earned income tax credit, tax year 2026 (IRS Rev. Proc. 2025-32 s.4.06; rates: IRC s.32):
+# children 0 / 1 / 2 / 3+ -> phase-in rate, maximum credit, phase-out rate; the phase-out
+# starts at 18,140 (no children) / 31,160 (children) for joint filers, 7,280 less for
+# others (the completed phase-outs 26,820 / 58,863 / 65,899 / 70,244 follow)
+EITC = ((0.0765, 664.0, 0.0765), (0.34, 4427.0, 0.1598), (0.40, 7316.0, 0.2106),
+        (0.45, 8231.0, 0.2106))
+EITC_START_MFJ = (18_140.0, 31_160.0)
+EITC_MFJ_EXTRA = 7_280.0
+
+
+def eitc(earned: float, kids: int, married: bool, scale: float = 1.0) -> float:
+    rin, mx, rout = EITC[min(max(kids, 0), 3)]
+    start = (EITC_START_MFJ[1 if kids else 0] - (0 if married else EITC_MFJ_EXTRA)) * scale
+    c = min(rin * earned, mx * scale)
+    return max(c - rout * max(earned - start, 0.0), 0.0)
 
 
 def parse_brackets(note: str) -> list[tuple[float, float]]:
@@ -263,7 +281,7 @@ def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
                     property_tax: float = 0.0) -> USResidentTax:
     """Federal + state + local income tax and employee payroll taxes for a US-resident
     couple (USD/year). Itemises when mortgage interest + SALT beat the standard
-    deduction; child tax credit with the refundable part."""
+    deduction; child tax credit with the refundable part; earned income tax credit."""
     wages = [max(w, 0.0) for w in wages]
     fica = sum(us_fica(w, p) for w in wages)
     payroll = sum(wages) * _num(st.get("payroll_pct")) / 100 if st else 0.0
@@ -288,7 +306,7 @@ def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
         ctc = max(ctc - 0.05 * max(agi - phase, 0), 0)
         nonref = min(ctc, t)
         refund = min(p.ctc_refundable * kids, ctc - nonref, max(0.15 * (agi - 2500), 0))
-        fed += t - nonref - refund
+        fed += t - nonref - refund - eitc(agi, deps, married, p.eitc_scale)
         s_tax += st_t
         loc += lo_t
     return USResidentTax(fed, s_tax, loc, fica, payroll)

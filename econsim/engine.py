@@ -47,6 +47,7 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     inputs: dict = field(default_factory=dict)   # resolved inputs with provenance
     summary: dict = field(default_factory=dict)  # pension rights etc. (start-year money)
+    career: list = field(default_factory=list)   # career.CareerPath per earner (US)
 
 
 VEHICLE_CATS = {"vehicle_purchase", "fuel_vehicle", "vehicle_maintenance", "vehicle_other",
@@ -59,7 +60,27 @@ LTC_DEFAULT = {"USA": (74_400, "CareScout Cost of Care 2025: national median ass
 CHURCH_TAX = {"DEU": 0.085}        # share of income tax (8% BY/BW, 9% elsewhere)
 YOUNG_DRIVER = ((25, 1.7), (30, 1.25))
 from .career import RANK_PERSISTENCE  # noqa: E402
-SURVEY_CORRECTION = 0.5           # default share (exponent) of the measured survey gap
+# Calibrated in econsim.backtest (SCF couples 2004-2022 run through what happened, vs the
+# same birth years in later waves) and econsim.calibrate (national saving rates):
+SURVEY_CORRECTION = 1.0           # the survey basket raised to national-accounts totals
+WEALTH_MPC = 0.04                 # share of free savings spent per year before retirement
+#                                   (not by renters saving for a home); Carroll, Otsuka &
+#                                   Slacalek 2011: 2-6 cents per dollar of wealth - the
+#                                   backtest cannot tell values apart (few couples hold
+#                                   much above the emergency fund)
+HOUSING_ELASTICITY = 0.75         # rent / home price vs income relative to the survey couple
+HOME_DRIFT = ((999, 0.0),)       # owned home vs the price index, by age: none - a repeat-
+#                                   sales index follows the same houses, so it already
+#                                   includes their ageing; SCF owner cohorts' homes kept pace
+#                                   with it (or gained, trading up), 1989-2025, nominal
+REFI_COUNTRIES = {"USA", "DNK"}
+REFI_GAP = 0.01                   # refinance when new loans cost this much less
+REFI_COST = 0.01                  # closing costs, added to the balance
+SCALE_BOUNDS = (0.25, 4.0)        # spending vs the survey couple's, at the extremes of income
+BORROW_LIMIT = 0.25               # unsecured debt a household can carry, x a year's net income
+SUBSIST_CUT = 0.3                 # beyond it, living costs are cut by up to this share
+FPL_2025 = (10_150.0, 5_500.0)    # HHS poverty guideline 2025: 10,150 + 5,500 per person
+CAR_ELASTICITY = 0.25             # car costs vs the same
 PRICE_TREND_YEARS = 10             # how long today's relative price trends continue
 MOVING_PCT = 1.0                   # removals + furnishing a bigger home, % of the price
 IRL_PRIVATE_HEALTH = (1600.0, 400.0)  # EUR/yr adult, child (VHI/Laya/Irish Life mid plan)
@@ -195,6 +216,15 @@ def resolve(plan: Plan, cd: CountryData) -> dict:
     if plan.equity_share is not None:
         out["equity_share"] = {"value": round(float(plan.equity_share) * 100, 1),
                                "unit": "% of investments", "source": "user input"}
+    elif PF.get("equity_share_typical") is not None:
+        out["equity_share"] = {
+            "value": round(float(PF["equity_share_typical"]) * 100, 1),
+            "unit": "% of investments", "quality": "B", "estimated": False,
+            "year": PF.get("year"),
+            "source": "typical households (bottom 70% by wealth): "
+            + str(PF.get("equity_share_typical_source", "")),
+            "note": f"the whole household sector holds {100 * float(PF['equity_share']):.0f}% "
+            "(OECD), led by the wealthiest"}
     elif PF.get("equity_share") is not None:
         out["equity_share"] = {
             "value": round(float(PF["equity_share"]) * 100, 1), "unit": "% of investments",
@@ -210,6 +240,15 @@ def resolve(plan: Plan, cd: CountryData) -> dict:
     if plan.deposit_share is not None:
         out["deposit_share"] = {"value": float(plan.deposit_share), "unit": "% of savings",
                                 "source": "user input"}
+    elif PF.get("deposit_share_typical") is not None:
+        out["deposit_share"] = {
+            "value": round(float(PF["deposit_share_typical"]) * 100, 1),
+            "unit": "% of savings", "quality": "B", "estimated": False,
+            "year": PF.get("year"),
+            "source": "typical households (bottom 70% by wealth): "
+            + str(PF.get("deposit_share_typical_source", "")),
+            "note": f"the whole household sector: {100 * float(PF['deposit_share']):.0f}% "
+            "(OECD)"}
     elif PF.get("deposit_share") is not None:
         out["deposit_share"] = {
             "value": round(float(PF["deposit_share"]) * 100, 1),
@@ -320,7 +359,163 @@ def resolve(plan: Plan, cd: CountryData) -> dict:
             "value": lr or out["mortgage_rate"]["value"], "unit": "%", "estimated": True,
             "source": (cd.lend or {}).get("rate_longrun_source", "lending.csv long-run "
                                           "average") if lr else "= today's rate"}
+    if "hci_5y" in IO:
+        h, c = IO["hci_5y"], IO.get("cpi_5y", (float("nan"),))
+        h1, c1 = IO.get("hci_12m", (float("nan"),)), IO.get("cpi_12m", (float("nan"),))
+        h10, c10 = IO.get("hci_10y", (float("nan"),)), IO.get("cpi_10y", (float("nan"),))
+        out["household_costs_5y"] = {
+            "value": round(h[0], 2), "unit": "%/yr", "year": h[1], "quality": "B",
+            "estimated": True, "source": h[2],
+            "note": f"what households pay rose {h1[0]:.1f}% in the last 12 months, "
+            f"{h[0]:.1f}%/yr over 5 years and {h10[0]:.1f}%/yr over 10 (CPI: {c1[0]:.1f}%, "
+            f"{c[0]:.1f}%, {c10[0]:.1f}%). The gap is housing: the CPI counts owners' "
+            "costs as an imputed rent, not home prices and mortgage interest. The "
+            "simulation prices your own housing, rent and each budget line directly - "
+            "see 'your own inflation' in the results - so this is shown, not added again"}
+    out.update(start_wealth_inputs(plan, cd, out))
     return out
+
+
+EDU_RANK = ("below_upper_secondary", "upper_secondary", "short_tertiary", "bachelor",
+            "master_plus")
+
+
+def home_price_for(plan: Plan, cd: CountryData, hp: dict) -> dict | None:
+    """Households buy homes in line with their means: the median price x what owner
+    couples with the household's education live in vs all owner couples, at the
+    planned buying age (US: SCF). None where unknown or the price is the user's."""
+    if plan.home_price is not None or cd.start_wealth is None:
+        return None
+    eds = [e.education for e in plan.earners if e.education in EDU_RANK]
+    if not eds:
+        return None
+    edu = max(eds, key=EDU_RANK.index)
+    a = plan.buy_house_age or 35
+    mine = start_wealth_value(cd, "owner_home", a, edu)
+    allc = start_wealth_value(cd, "owner_home", a, None)
+    if not mine or not allc or mine[2] == "all" or allc[1] != mine[1] or allc[0] <= 0:
+        return None
+    k = mine[0] / allc[0]
+    return dict(hp, value=hp["value"] * k,
+                source=hp["source"] + f"; x {k:.2f}: owner couples "
+                f"{'with' if mine[2] == 'degree' else 'without'} a bachelor's degree aged "
+                f"{a} live in homes worth {k:.2f}x those of all owner couples (SCF "
+                f"{mine[1]})", estimated=True)
+
+
+SW_EDU = {"bachelor": "degree", "master_plus": "degree", "short_tertiary": "no_degree",
+          "upper_secondary": "no_degree", "below_upper_secondary": "no_degree"}
+
+
+def start_wealth_value(cd: CountryData, stat: str, age: int, edu: str | None):
+    """What couples of this age (head) and degree hold now (US: SCF), with its year."""
+    t = cd.start_wealth
+    if t is None or len(t) == 0:
+        return None
+    for e, ht in ((SW_EDU.get(edu or "", "all"), "couple"), ("all", "couple"),
+                  (SW_EDU.get(edu or "", "all"), "all"), ("all", "all")):
+        r = t[(t["statistic"] == stat) & (t["education"] == e) & (t["household_type"] == ht)]
+        # only where families of about this age were surveyed (no extrapolation)
+        if len(r) >= 2 and r["age"].min() - 1 <= age <= r["age"].max() + 1:
+            r = r.sort_values("age")
+            v = float(np.interp(age, r["age"], r["value"]))
+            src = str(r["source"].iloc[0]) if "source" in r else ""
+            return v, int(r["year"].iloc[0]), e, ht, src
+    return None
+
+
+def owns_at_start(plan: Plan, cd: CountryData) -> bool:
+    if plan.own_home is not None:
+        return bool(plan.own_home)
+    e1 = plan.earners[0]
+    return plan.buy_house_age is not None and e1.age >= plan.buy_house_age and \
+        start_wealth_value(cd, "owner_home", e1.age, e1.education) is not None
+
+
+def start_wealth_inputs(plan: Plan, cd: CountryData, out: dict) -> dict:
+    """Starting balances: what you enter, else what families like yours hold at your age
+    (US: Survey of Consumer Finances; euro area: ECB HFCS; elsewhere none - enter yours)."""
+    e1 = plan.earners[0]
+    res = {}
+    own = owns_at_start(plan, cd)
+
+    def sw(key, override, stat, note):
+        if override is not None:
+            res[key] = {"value": float(override), "unit": cd.currency, "source": "user input"}
+            return
+        v = start_wealth_value(cd, stat, e1.age, e1.education)
+        if v is None:
+            res[key] = {"value": 0.0, "unit": cd.currency, "estimated": True,
+                        "source": "none assumed (no survey of household wealth by age "
+                        "loaded for this country): enter yours"}
+            return
+        val, yr, e, ht, src = v
+        if "HFCS" in src:
+            text = (f"{src}: median for households with the reference person aged "
+                    f"{e1.age} (between the survey's 10-year age bands)")
+        else:
+            text = (f"Federal Reserve SCF {yr}: median for "
+                    f"{'couples' if ht == 'couple' else 'families'} with the head aged "
+                    f"{e1.age} (7-year window)"
+                    + ("" if e == "all" else f", {'with' if e == 'degree' else 'without'} "
+                       "a bachelor's degree"))
+        res[key] = {"value": round(val, -2), "unit": cd.currency, "year": yr,
+                    "quality": "A" if "HFCS" not in src else "B", "estimated": False,
+                    "source": text, "note": note}
+
+    res["own_home"] = {"value": float(own), "unit": "", "source": "user input"
+                       if plan.own_home is not None else
+                       "planned buying age reached: owning, as the owners of this age "
+                       "surveyed" if own else "renting at the start"}
+    if own:
+        sw("starting_savings", plan.starting_savings, "owner_fin",
+           "home owners' financial assets (incl. retirement accounts, which are split off)")
+        sw("starting_retirement", plan.starting_retirement, "owner_retirement",
+           "home owners' retirement accounts (401k, IRA)")
+        sw("home_value_now", plan.home_value_now, "owner_home", "owners' primary home")
+        sw("mortgage_now", plan.mortgage_now, "owner_mortgage",
+           "owners' mortgage and home-equity debt (0 for the many who have paid off)")
+        if res["home_value_now"]["value"] <= 0:
+            res["home_value_now"] = {"value": out["home_price"]["value"], "unit": cd.currency,
+                                     "estimated": True, "source": "the typical home price "
+                                     "(enter your home's value)"}
+            if plan.mortgage_now is None:
+                res["mortgage_now"] = {"value": 0.5 * out["home_price"]["value"],
+                                       "unit": cd.currency, "estimated": True,
+                                       "source": "assumption: half the value still owed "
+                                       "(enter your balance)"}
+        lr = _nan0((cd.lend or {}).get("rate_longrun"))
+        res["mortgage_rate_now"] = (
+            {"value": float(plan.mortgage_rate_now), "unit": "%", "source": "user input"}
+            if plan.mortgage_rate_now is not None else
+            {"value": lr or out["mortgage_rate"]["value"], "unit": "%", "estimated": True,
+             "quality": "B", "source": "average rate on new loans over the last 20 years ("
+             + (cd.lend or {}).get("rate_longrun_source", "") + "): existing loans were "
+             "taken out and refinanced over many years (FHFA reports ~4% on outstanding US "
+             "mortgages)"})
+        bal, val = res["mortgage_now"]["value"], max(res["home_value_now"]["value"], 1.0)
+        res["mortgage_years_left"] = (
+            {"value": int(plan.mortgage_years_left), "unit": "years", "source": "user input"}
+            if plan.mortgage_years_left is not None else
+            {"value": int(min(max(round(30 * bal / (0.85 * val)), 5), 30)) if bal > 0 else 0,
+             "unit": "years", "estimated": True, "quality": "C",
+             "source": "assumption: a 30-year loan for 85% of the value, paid down in "
+             "proportion to the balance left"})
+    else:
+        sw("starting_savings", plan.starting_savings, "renter_fin",
+           "renters' financial assets incl. retirement accounts (split off below)")
+        sw("starting_retirement", plan.starting_retirement, "renter_retirement",
+           "renters' retirement accounts (401k, IRA)")
+    # the medians of a total and of a part do not subtract exactly; the part is capped
+    tot = res["starting_savings"]
+    rt = res["starting_retirement"]
+    if tot.get("source") != "user input" and rt.get("source") != "user input":
+        r = min(rt["value"], tot["value"])
+        res["starting_retirement"] = dict(rt, value=round(r, -2))
+        res["starting_savings"] = dict(tot, value=round(max(tot["value"] - r, 0.0), -2),
+                                       note=tot.get("note", "") + " - less the retirement "
+                                       "accounts")
+    return res
 
 
 def interp_nrr(tab: dict, rel: float) -> float:
@@ -384,6 +579,9 @@ def roll(value: float, from_year, to_year: int, inflation: float,
     except (TypeError, ValueError):
         return value
     f = 1.0
+    if cpi and to_year < fy and to_year in cpi:          # back in time: actual CPI
+        top = min(fy, max(cpi))
+        return value * cpi[to_year] / cpi[top] / (1 + inflation / 100) ** (fy - top)
     if cpi and fy in cpi:
         last = min(max(cpi), to_year)
         if last > fy:
@@ -462,7 +660,36 @@ def leave_schedule(n_years: int, birth_ts: list, hh: dict, plan: Plan) -> list[l
     return sched
 
 
-def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
+def cohort_pay_path(coh, age0: int, edu: str | None, years: int, mode: str):
+    """(growth, gap): the cohort's typical pay relative to economy-wide wages, h = 0..
+    years-1 (today's age brackets + the gap that lasts; ratio to h = 0), and the lasting
+    gap alone as a factor on a cross-sectional profile. None where no cohort data."""
+    if coh is None:
+        return None
+    if coh.get("earn_ftyr", edu) is not None:         # US: CPS ASEC
+        # full-time year-round workers: a pay RATE, like the model's (all earners' annual
+        # pay also mixes in part-year work - new graduates, people easing into retirement)
+        p = coh.path("earn_ftyr", edu, age0, years, mode)
+        ok = ~np.isnan(p)
+        if not ok.any():
+            return None
+        p = np.where(ok, p, p[ok][-1])
+        gap = np.exp([coh.adjustment("earn_ftyr", edu, age0, h, mode)
+                      for h in range(years)])
+        return np.exp(p - p[0]), gap
+    if coh.get("earn_ses", "all") is not None:        # Europe: SES (age bands)
+        gap = np.exp([coh.adjustment("earn_ses", "all", age0, h, mode)
+                      for h in range(years)])
+        return None, gap
+    return None
+
+
+def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
+             history=None) -> Result:
+    """history: an econsim.history.History - what actually happened from the start year
+    (prices, wages, home prices, rents, rates, returns, unemployment) in place of the
+    forecasts; levels (budget, rents, home prices) are taken back to the start year by
+    their own price indices. For backtests."""
     inp = resolve(plan, cd)
     infl = inp["inflation"]["value"] / 100
     g_real = inp["real_wage_growth"]["value"] / 100
@@ -484,7 +711,12 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     dy = cd.data_year
     cpi = cd.cpi or None
 
+    HS = history
+
     def start(v, year=None):  # data-year money -> start-year money
+        if HS is not None:     # back to a past start year with the actual CPI
+            return roll(v, year if year is not None else dy, dy, infl * 100, cpi) * \
+                HS.cpi_level
         return roll(v, year if year is not None else dy, y0, infl * 100, cpi)
 
     e1, e2 = plan.earners
@@ -493,9 +725,18 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     # long-run rate
     near = inp.get("inflation_next_5y", {}).get("value")
     INF = [near / 100 if near is not None and t < 5 else infl for t in range(n_years + 2)]
+    if HS is not None:
+        INF = [HS.infl[t] if t < HS.n() and HS.infl[t] == HS.infl[t] else INF[t]
+               for t in range(len(INF))]
     Pt = [1.0]
     for t in range(n_years + 1):
         Pt.append(Pt[-1] * (1 + INF[t]))
+    # economy-wide real wages (forecast, or what they did)
+    GW = [1.0]
+    for t in range(n_years + 1):
+        g_t = HS.wage_real[t] if HS is not None and t < HS.n() and \
+            HS.wage_real[t] == HS.wage_real[t] else g_real
+        GW.append(GW[-1] * (1 + g_t))
     warnings: list[str] = []
     events: list[dict] = []
     us_resident = cd.iso3 == "USA" and us is not None
@@ -513,6 +754,23 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         e = plan.earners[i]
         return edu_pay_factor(cd, e.education, age) if plan.education_pay else 1.0
 
+    # ---- cohorts: each partner's cohort vs the people before it at the same age
+    coh, cmode = cd.cohort, plan.cohort_effects
+    pay_g = [cohort_pay_path(coh, e.age, e.education if plan.education_pay else None,
+                             n_years, cmode) for e in plan.earners]
+    for i, e in enumerate(plan.earners):
+        if pay_g[i] is None or pay_g[i][0] is None:
+            # no full-time series by single age: the country's full-time pay by age
+            # (today's brackets) x the generation gap that lasts, where measured
+            pts = cd.earnings.get(e.percentile) or cd.earnings.get("median")
+            if pts:
+                ed = e.education if plan.education_pay else None
+                b0 = interp_profile(pts, e.age) * edu_pay_factor(cd, ed, e.age)
+                shape = np.array([interp_profile(pts, e.age + h) *
+                                  edu_pay_factor(cd, ed, e.age + h) / b0 if b0 > 0 else 1.0
+                                  for h in range(n_years)])
+                gap = pay_g[i][1] if pay_g[i] is not None else np.ones(n_years)
+                pay_g[i] = (shape * gap, gap)
     # ---- careers from today's job market (US): situation mix, moves, raises
     paths = [None, None]
     cdat = cd.career if plan.career_model else None
@@ -523,13 +781,13 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             paths[i] = career_path(cdat, e.age, e.education if plan.education_pay else None,
                                    n_years, percentile=e.percentile, job=e.job, pay_now=pn,
                                    window="trend" if plan.job_market == "trend" else
-                                   "current")
+                                   "current", growth=pay_g[i][0] if pay_g[i] else None)
         for i, pth in enumerate(paths):
             m0 = pth.mix[0]
             inp[f"P{i + 1} situation now"] = {
                 "value": round(100 * m0.get(pth.start_state or "FT_grad", 0.0), 1),
                 "unit": "%", "year": cdat.year, "quality": "A", "estimated": False,
-                "source": f"CPS microdata {cdat.window}: " + (
+                "source": f"{cdat.source} {cdat.window}: " + (
                     f"{STATE_LABEL[pth.start_state]} (your input)" if pth.start_state else
                     "today's mix for this age and degree - " + ", ".join(
                         f"{STATE_LABEL[k]} {v:.0%}" for k, v in m0.items())),
@@ -537,6 +795,28 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 "moves between situations as people of this age and degree make them now"
                 + ("; the last year's change continues 5 years" if plan.job_market == "trend"
                    else "")}
+    for i, e in enumerate(plan.earners):
+        if pay_g[i] is None or coh is None:
+            continue
+        m = "earn_ftyr" if coh.get("earn_ftyr", None) is not None else "earn_ses"
+        edu = e.education if plan.education_pay else None
+        g10 = coh.gap_now(m, edu, e.age, 10)
+        a10 = coh.adjustment(m, edu, e.age, 10, cmode)
+        src = coh.source.get(m, "")
+        inp[f"P{i + 1} cohort pay gap"] = {
+            "value": round(100 * (np.exp(a10) - 1), 1), "unit": "%", "quality": "B",
+            "estimated": True, "year": coh.latest_year(m),
+            "source": f"{src}: people aged {e.age} now earn {100 * (np.exp(g10) - 1):+.1f}% "
+            + ("(full time, year round) " if m == "earn_ftyr" else "") +
+            "vs people 10 years older when they were this age (relative to all workers; "
+            "last 3 surveys)",
+            "note": ("in 10 years: this much vs today's people aged "
+                     f"{e.age + 10}; " + (
+                         "the whole gap lasts (your choice)" if cmode == "full" else
+                         "no gap carried (your choice)" if cmode == "off" else
+                         f"{100 * coh.phi(m, 10):.0f}% of such gaps have lasted 10 years "
+                         "in past surveys" + (f" ({coh.borrowed[m]})" if m in coh.borrowed
+                                              else "")))}
     # elsewhere: a stated current pay sets the level (the profile keeps its shape)
     pay_k = [1.0, 1.0]
     for i, e in enumerate(plan.earners):
@@ -549,17 +829,21 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         if not e.works or age >= ret_age or age < 18:
             return 0.0
         pen_w = 1.0
+        if e.pay_path is not None:            # given pay (backtests: what it was)
+            return float(e.pay_path[min(t, len(e.pay_path) - 1)])
         if i == plan.primary_parent and plan.child_wage_penalty and first_birth is not None \
                 and t >= first_birth:
             pen_w = 1 - plan.child_wage_penalty / 100    # lasting hourly-pay penalty
         if paths[i] is not None:
             return start(paths[i].pay[min(t, len(paths[i].pay) - 1)], cdat.year) * pen_w \
-                * (1 + g_real) ** t * Pt[t]
+                * GW[t] * Pt[t]
         base0 = interp_profile(prof[i], e.age) * pay_f(i, e.age)
         shape = interp_profile(prof[i], age) * pay_f(i, age) / base0 if base0 else 1.0
+        if pay_g[i] is not None and pay_g[i][1] is not None:  # the cohort's lasting gap
+            shape *= pay_g[i][1][min(t, len(pay_g[i][1]) - 1)]
         rel = shape ** e.career_growth if shape > 0 else 0.0
         k = 1 + (pay_k[i] - 1) * RANK_PERSISTENCE ** t    # stated pay fades to the profile
-        return start(base0, earn_year) * k * rel * pen_w * (1 + g_real) ** t * Pt[t]
+        return start(base0, earn_year) * k * rel * pen_w * GW[t] * Pt[t]
 
     first_birth = min((a - e1.age for a in plan.child_ages if a is not None), default=None)
     aw0 = start(cd.avg_wage.value, cd.avg_wage.year)
@@ -569,8 +853,11 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     have_oop = bool(hh) and hh.get("health_oop_adult", float("nan")) == \
         hh.get("health_oop_adult", 0)
     budget0, removed0 = {}, {}
-    surv_k = plan.survey_correction if plan.survey_correction is not None else (
-        SURVEY_CORRECTION if cd.budget_coverage_measured else 0.0)
+    lvl = plan.spending_level if plan.spending_level is not None else (
+        float(cd.spending_level.value) if plan.spending_fit and cd.spending_level is not None
+        else 1.0)
+    surv_k = plan.survey_correction if plan.survey_correction is not None else \
+        SURVEY_CORRECTION
     for k, v in cd.budget.items():
         val = start(v.value, v.year) * 12
         if have_cars and k in VEHICLE_CATS:
@@ -591,8 +878,9 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     ref = cd.budget_ref_income
     ref0 = None
     bp = next(iter(cd.budget.values())).year if cd.budget else dy
+    ref_all0 = None
     if ref is not None:   # ref.value is already in the budget's price year
-        ref0 = start(ref.value, bp)
+        ref0 = ref_all0 = start(ref.value, bp)
         if cd.budget_ref_housing is not None:   # income left after housing costs
             ref0 -= start(cd.budget_ref_housing.value, bp) * 12
     rent0 = start(inp["rent"]["value"], inp["rent"]["year"]) * 12
@@ -614,6 +902,23 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                           _nan0(hh["parking_tolls"]))
         car_ins0 = hp25(hh["car_insurance"])
         transit0 = hp25(hh["transit_pass"]) * 12
+    hc_k = 1.0
+    if HS is not None:   # back then: each price vs the CPI, spending norms vs real wages
+        RL = HS.rel_level.get
+        aw0 *= HS.wage_level
+        for k in budget0:
+            budget0[k] *= RL(k, 1.0) / HS.wage_level
+        if ref0:
+            ref0 /= HS.wage_level
+            ref_all0 /= HS.wage_level
+        rent0 *= HS.rent_level
+        price0 *= HS.home_level
+        childcare0 *= RL("childcare", 1.0)
+        child_spend0 /= HS.wage_level
+        car_fixed0 *= RL("vehicle_running", 1.0)
+        car_ins0 *= RL("insurance_vehicle", 1.0)
+        transit0 *= RL("transport_services", 1.0)
+        hc_k = RL("insurance_health", 1.0)
     leave = leave_schedule(n_years, [None if a is None else a - e1.age for a in plan.child_ages],
                            hh, plan)
     nrr = {m: s.value for m, s in cd.nrr.items()}
@@ -634,12 +939,26 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     dp_user = plan.down_payment_pct is not None
 
     def unemp_rate(age: int, education: str | None = None, i: int | None = None) -> float:
+        u = _unemp_rate(age, education, i)
+        if HS is not None and i is not None:
+            t = age - plan.earners[i].age
+            u *= HS.unemp_factor[min(max(t, 0), len(HS.unemp_factor) - 1)]
+        return u
+
+    def _unemp_rate(age: int, education: str | None = None, i: int | None = None) -> float:
         if i is not None and paths[i] is not None:
             pth = paths[i]
             return 100 * pth.unemployment[min(age - plan.earners[i].age,
                                               len(pth.unemployment) - 1)]
         v, _ = unemployment_rate_for(cd, age, education)
         if v is not None:   # by age band and degree (labour_market.csv)
+            if i is not None and coh is not None and cmode != "off":
+                from .cohort import from_rel, to_rel
+                a_ = coh.adjustment("unemp", education, plan.earners[i].age,
+                                    age - plan.earners[i].age, cmode)
+                if a_:
+                    v = 100 * float(from_rel(to_rel(v / 100, 0.5, "logit") + a_, 0.5,
+                                             "logit"))
             return v
         y, tot = _nan0(cd.unemp_youth), _nan0(cd.unemp_total)
         if age < 25:
@@ -676,14 +995,20 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 return min(table[key], 1.0)
         return 1.0
 
+    h_scale0 = 1.0
     Hh, Hr = [1.0], [1.0]
     for t in range(1, n_years + 1):
         gh = home_tr / 100 if home_tr is not None and t <= 10 else g_house
         gr = rent_tr / 100 if rent_tr is not None and t <= 10 else g_house
+        if HS is not None and t - 1 < HS.n():
+            gh = HS.home_real[t - 1] if HS.home_real[t - 1] == HS.home_real[t - 1] else gh
+            gr = HS.rent_real[t - 1] if HS.rent_real[t - 1] == HS.rent_real[t - 1] else gr
         Hh.append(Hh[-1] * (1 + gh))
         Hr.append(Hr[-1] * (1 + gr))
-    cash = plan.starting_savings
-    invest = retire = 0.0
+    sw_year = lambda k: inp[k].get("year") or y0  # noqa: E731
+    cash = start(inp["starting_savings"]["value"], sw_year("starting_savings"))
+    retire = start(inp["starting_retirement"]["value"], sw_year("starting_retirement"))
+    invest = 0.0
     owned = False
     home_value = mort_bal = mort_pay = 0.0
     mort_rate = m_rate_now
@@ -692,6 +1017,15 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     loan0 = buy_price = 0.0
     ch_style = False
     fix_years_eff = fix_years
+    if inp["own_home"]["value"]:  # already own: today's value, balance, rate, term left
+        owned = True
+        home_value = buy_price = start(inp["home_value_now"]["value"],
+                                       sw_year("home_value_now"))
+        mort_bal = loan0 = start(inp["mortgage_now"]["value"], sw_year("mortgage_now"))
+        mort_rate = inp["mortgage_rate_now"]["value"] / 100
+        mort_left = inp["mortgage_years_left"]["value"]
+        fix_years_eff = 99 if cd.iso3 in ("USA", "DNK") else max(fix_years / 2, 1)
+        mort_pay = annuity(mort_bal, mort_rate, max(mort_left, 1)) if mort_bal > 0 else 0.0
     sl0 = plan.student_loan
     if plan.typical_student_debt and not sl0:
         for e in plan.earners:
@@ -737,12 +1071,20 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     PTR = cd.price_trends if plan.price_outlook == "trend" else {}
 
     def RT(k: str, t: int) -> float:
+        if HS is not None and k in HS.rel:
+            v = HS.rel[k][min(t, len(HS.rel[k]) - 1)]
+            if v == v:
+                return v
         r = PTR.get(k)
         return (1 + min(max(r[0], -4.0), 4.0) / 100) ** min(t, PRICE_TREND_YEARS) if r \
             else 1.0
 
     def RT_w(k: str, t: int) -> float:
         """For costs that already rise with wages: only the part of the trend beyond."""
+        if HS is not None and k in HS.rel:
+            v = HS.rel[k][min(t, len(HS.rel[k]) - 1)]
+            if v == v:
+                return v / GW[t]                     # what that price actually did
         r = PTR.get(k)
         if not r:
             return 1.0
@@ -764,14 +1106,22 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         a1, a2 = e1.age + t, e2.age + t
         ages = (a1, a2)
         P = Pt[t]
-        W = (1 + g_real) ** t * Pt[t]
+        W = GW[t] * Pt[t]
         # glide path: the share in shares falls over the 15 years before retirement to
         # half of it (as target-date funds and most retirees' portfolios)
         if plan.glide_path:
             k = min(max((a1 - (ret_age - 15)) / 15, 0.0), 1.0)
             r_inv_t = r_inv - 0.5 * k * eq_share * plan.equity_premium / 100
         else:
+            k = 0.0
             r_inv_t = r_inv
+        if HS is not None and t < len(HS.years) and HS.equity[t] == HS.equity[t]:
+            eq_t = eq_share * (1 - 0.5 * k)          # what markets actually returned
+            bond = HS.bond[t] if HS.bond[t] == HS.bond[t] else HS.cash[t]
+            r_inv_t = (eq_t * HS.equity[t] + (1 - eq_t) * bond - plan.fund_fees -
+                       drag) / 100
+            r_cash = HS.cash[t] / 100 if HS.cash[t] == HS.cash[t] else r_cash
+            r_dep = HS.deposit[t] / 100 if HS.deposit[t] == HS.deposit[t] else r_dep
         H = P * Hr[t]                 # rents
         HH = P * Hh[t]                # home prices
         aw = aw0 * W
@@ -798,7 +1148,8 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         # ---- normal (no leave / job loss) taxes and net, per earner and household
         def taxes(gross: list[float], interest: float = 0.0, prop_tax: float = 0.0):
             if us_resident:
-                p_us = us.indexed((1 + infl) ** (y0 - 2026) * Pt[t])
+                p_us = us.indexed((HS.cpi_level if HS is not None else
+                                   (1 + infl) ** (y0 - 2026)) * Pt[t])
                 r = us_resident_tax([g / fx for g in gross], married, n_ctc, n_dep, p_us, st,
                                     interest / fx, prop_tax / fx)
                 tot = sum(gross) or 1.0
@@ -819,7 +1170,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         it_n, ssc_n = taxes(normal)
         pen_n = [pension_contribution(cd.iso3, g, a, hh) for g, a in zip(normal, ages)]
         net_i = [g - i - s - p for g, i, s, p in zip(normal, it_n, ssc_n, pen_n)]
-        child_ben = child_ben0 * P * n_dep * ((1 + g_real) ** t)
+        child_ben = child_ben0 * P * n_dep * GW[t]
         # ---- pensions: career-average earnings relative to the average wage (incl. the
         # child penalty) x the OECD net replacement rate at that level, from the
         # retirement age; then indexed to prices
@@ -901,7 +1252,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         us_tax = 0.0
         us_method = ""
         if abroad:
-            f_us = (1 + infl) ** (y0 - 2026) * Pt[t]
+            f_us = (HS.cpi_level if HS is not None else (1 + infl) ** (y0 - 2026)) * Pt[t]
             p_us = us.indexed(f_us)
             housing_usd = (rent0 * H / fx) if not owned else 0.0
             res = us_expat_tax([g / fx for g in gross], [x / fx for x in it], married,
@@ -915,8 +1266,9 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         retired = sum(normal) == 0 and min(ages) >= ret_age
 
         # ---- expenses (nominal)
-        G = (1 + g_real) ** t      # living standards rise with economy-wide real wages
+        G = GW[t]                  # living standards rise with economy-wide real wages
         scale = G
+        rel_inc = 1.0              # income vs the survey couple's (same year)
         if ref0 and plan.budget_elasticity:
             if owned:
                 housing_now = prev_housing
@@ -934,9 +1286,42 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             # the survey couple's income grows with economy-wide real wages too: spending
             # norms rise with average incomes (saving rates do not trend up as countries
             # grow), so only income RELATIVE to peers moves the budget
-            scale = G * (min(max((y_perm / (ref0 * G)) ** plan.budget_elasticity, 0.5), 2.0)
-                         if y_perm > 0 else 0.5)
+            scale = G * (min(max((y_perm / (ref0 * G)) ** plan.budget_elasticity,
+                                 SCALE_BOUNDS[0]), SCALE_BOUNDS[1])
+                         if y_perm > 0 else SCALE_BOUNDS[0])
+            # what the household can afford in housing and cars: its income before
+            # housing vs the survey couple's (after housing it would feed back on itself)
+            y_all = (normal_net - child_ben) / P
+            rel_inc = y_all / (ref_all0 * G) if y_all > 0 and ref_all0 else 0.25
+        # housing and cars follow income too (cheaper flats and older cars on less)
+        h_el = plan.housing_elasticity if plan.housing_elasticity is not None else \
+            HOUSING_ELASTICITY
+        c_el = plan.car_elasticity if plan.car_elasticity is not None else CAR_ELASTICITY
+        h_scale = min(max(rel_inc, 0.25), 4.0) ** h_el
+        if t == 0:
+            h_scale0 = h_scale
+        if plan.rent is not None:     # your own rent is your rent now: only later changes
+            h_scale = h_scale / h_scale0 if h_scale0 > 0 else 1.0
+        c_scale = min(max(rel_inc, 0.25), 4.0) ** c_el
         exp = {f"budget:{k}": v * P * scale * RT(k, t) for k, v in budget0.items()}
+        # what households spend beyond any survey category, even at national-accounts
+        # level (interest on consumer debt, gifts and transfers, giving, irregular big
+        # costs): the calibrated level (econsim.backtest / .calibrate), as its own line
+        if lvl > 1.0:
+            exp["budget:other_unrecorded"] = (lvl - 1.0) * sum(exp.values())
+        elif lvl < 1.0:        # the national-accounts basket overshoots: scaled down
+            exp = {k: v * lvl for k, v in exp.items()}
+        # wealth effect: before retirement households spend a share of their savings
+        # above the emergency fund each year (bigger homes, cars, trips, helping family);
+        # calibrated in econsim.backtest on what SCF couples actually accumulated
+        w_mpc = plan.wealth_mpc if plan.wealth_mpc is not None else WEALTH_MPC
+        saving_for_home = not owned and buy_t_plan is not None
+        if w_mpc and not retired and not saving_for_home:
+            free_w = max(cash + invest - tgt_prev, 0.0)
+            base_b = sum(exp.values())
+            if base_b > 0 and free_w > 0:
+                f_w = 1 + w_mpc * free_w / base_b
+                exp = {k: v * f_w for k, v in exp.items()}
         # children: OECD-modified equivalence scale (couple 1.5; child <14 +0.3, 14+ +0.5)
         # applied to the couple's non-housing living budget; housing via the rent factor,
         # childcare, health and cars separately
@@ -946,7 +1331,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             # with children, and children do not drink or smoke
             w = sum(0.3 / 1.5 if k < 14 else 0.5 / 1.5 for k in kid_ages
                     if k <= dep_to)
-            exp["children"] = sum(v for k, v in budget0.items() if k in PER_PERSON_CATS) \
+            exp["children"] = lvl * sum(v for k, v in budget0.items() if k in PER_PERSON_CATS) \
                 * P * scale * w
         else:
             exp["children"] = child_spend0 * P * n_home * scale
@@ -981,13 +1366,25 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                     hc += _nan0(prem) * 12
                 if have_oop:
                     hc += _nan0(hh.get("health_oop_adult"))
+            kid_hc = 0.0
             for k in kid_ages:
                 if k <= dep_to:
-                    hc += _nan0(hh.get("health_premium_child")) * 12 * have_health + \
+                    kid_hc += _nan0(hh.get("health_premium_child")) * 12 * have_health + \
                         _nan0(hh.get("health_oop_child")) * have_oop
+            if cd.iso3 == "USA":
+                # means-tested public cover: CHIP for children below 200% of the federal
+                # poverty guideline (state limits: median ~250%), Medicaid for adults below
+                # 138% (ACA expansion, from 2014; 41 states)
+                fpl = start(FPL_2025[0] + FPL_2025[1] * (2 + n_home), 2025) * P
+                inc_f = sum(normal) / fpl if fpl > 0 else 99.0
+                if inc_f < 2.0:
+                    kid_hc = 0.0
+                if inc_f < 1.38 and y0 + t >= 2014:
+                    hc = 0.0
+            hc += kid_hc
             if plan.private_health and cd.iso3 == "IRL":
                 hc += 2 * IRL_PRIVATE_HEALTH[0] + n_dep * IRL_PRIVATE_HEALTH[1]
-            exp["health"] = start(hc, 2025) * P * G * RT_w("insurance_health", t)
+            exp["health"] = start(hc, 2025) * hc_k * P * G * RT_w("insurance_health", t)
         # cars and public transport
         if have_cars:
             car = 0.0
@@ -995,7 +1392,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 age = ages[min(k, 1)]
                 f = next((m for lim, m in YOUNG_DRIVER if age < lim), 1.0)
                 car += car_fixed0 + car_ins0 * f
-            exp["cars"] = car * P * G * RT_w("insurance_vehicle", t)
+            exp["cars"] = car * P * G * RT_w("insurance_vehicle", t) * c_scale
             exp["public_transport"] = max(2 - n_cars, 0) * transit0 * P * G
         exp["emergencies"] = emerg0 * P * G
         # student loan
@@ -1033,7 +1430,7 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         if n_home:
             rent_f = cd.rent_factor_per_child[min(n_home, 2) - 1]
         if not owned and buy_t_plan is not None and t >= buy_t_plan:
-            price = price0 * HH
+            price = price0 * HH * h_scale
             young = a1 <= _nan0(L.get("young_max_age"))
             if dp_user or not L:
                 dp_min = inp["down_payment_pct"]["value"] / 100
@@ -1046,6 +1443,9 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                 term = 25
             # buying later: today's rate moves to the forward rate over 5 years
             rate = m_rate_now + (rate_lr - m_rate_now) * min(t / 5, 1.0)
+            if HS is not None and t < len(HS.years) and \
+                    HS.mortgage_rate[t] == HS.mortgage_rate[t]:
+                rate = HS.mortgage_rate[t] / 100       # what new loans cost that year
             fixed_all = False
             if cd.iso3 == "HUN" and price / P <= 100e6 and a1 < 99:   # Otthon Start
                 rate, dp_min, term, fixed_all = 0.03, 0.10, 25, True
@@ -1128,6 +1528,20 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         interest = principal = 0.0
         if owned:
             if mort_bal > 0.5:
+                # refinancing where fixed loans can be repaid without penalty (US,
+                # Denmark): when new loans cost REFI_GAP points less, owners take a new
+                # 30-year loan at that rate (costs added to the loan) - so equity builds
+                # more slowly than the original schedule
+                if cd.iso3 in REFI_COUNTRIES and not ch_style and t > 0:
+                    m_new = m_rate_now + (rate_lr - m_rate_now) * min(t / 5, 1.0)
+                    if HS is not None and t < len(HS.years) and \
+                            HS.mortgage_rate[t] == HS.mortgage_rate[t]:
+                        m_new = HS.mortgage_rate[t] / 100
+                    if m_new < mort_rate - REFI_GAP and mort_left < 28:
+                        mort_bal *= 1 + REFI_COST
+                        mort_rate, mort_left = m_new, 30
+                        mort_pay = annuity(mort_bal, mort_rate, mort_left)
+                        fix_years_eff = mort_age + 99
                 if mort_age >= fix_years_eff and abs(mort_rate - rate_lr) > 1e-9:
                     mort_rate = rate_lr        # fixed period over: long-run average rate
                     if not ch_style:
@@ -1169,9 +1583,11 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                                                             else interest)
                 if relief:
                     exp["mortgage_interest_relief"] = -relief
-            home_value *= Pt[t + 1] / Pt[t] * Hh[t + 1] / Hh[t]
+            # an owned home follows the (repeat-sales) price index
+            drift = next(d for lim, d in HOME_DRIFT if a1 < lim)
+            home_value *= Pt[t + 1] / Pt[t] * Hh[t + 1] / Hh[t] * (1 + drift)
         else:
-            exp["rent"] = rent0 * H * rent_f
+            exp["rent"] = rent0 * H * rent_f * h_scale
         # wealth tax (Norway, Switzerland)
         wt = _nan0(hh.get("wealth_tax_rate"))
         if wt:
@@ -1180,6 +1596,18 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             thr = _nan0(hh.get("wealth_tax_threshold")) * (2 if married else 2) * P
             if base > thr:
                 exp["wealth_tax"] = wt * (base - thr)
+        # ---- what each line's PRICE did this year (quantities aside): the household's
+        # own cost of living, like the UK Household Costs Indices - its own basket, with
+        # market rents and what its mortgage actually costs (fixed loans: nothing more)
+        pfac = {"rent": H, "owner_costs": HH, "children": P, "emergencies": P * G,
+                "childcare": P * G * RT_w("childcare", t),
+                "health": P * G * RT_w("insurance_health", t),
+                "cars": P * G * RT_w("insurance_vehicle", t),
+                "public_transport": P * G, "university": P * G, "long_term_care": P * G,
+                "mortgage_payment": 1.0, "mortgage_insurance": 1.0, "student_loan": 1.0}
+        for k in budget0:
+            pfac[f"budget:{k}"] = P * RT(k, t)
+        pfac["budget:other_unrecorded"] = P
         recurring = sum(exp.values())
         prev_housing = (interest + exp.get("owner_costs", 0.0) + exp.get("mortgage_insurance", 0.0)
                         + exp.get("mortgage_interest_relief", 0.0)) * (1 + INF[t])
@@ -1194,7 +1622,15 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
         if avail < 0:
             keys = [k for k in exp if k in DISCRETIONARY or (retired and
                                                               k.startswith("budget:"))]
-            pool = sum(exp[k] for k in keys) + CHILD_DISCRETIONARY * exp.get("children", 0.0)
+            # the unrecorded line is as discretionary as the recorded basket
+            bl = sum(v for k, v in exp.items() if k.startswith("budget:") and
+                     k != "budget:other_unrecorded")
+            o_share = (sum(exp[k] for k in keys if k != "budget:other_unrecorded") / bl
+                       if bl > 0 and not retired else 1.0)
+            oth = exp.get("budget:other_unrecorded", 0.0)
+            keys = [k for k in keys if k != "budget:other_unrecorded"]
+            pool = sum(exp[k] for k in keys) + CHILD_DISCRETIONARY * exp.get("children", 0.0) \
+                + o_share * oth
             cut = min(-avail, MAX_SQUEEZE * pool)
             if cut > 0:
                 f = cut / pool
@@ -1202,7 +1638,26 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                     exp[k] *= 1 - f
                 if "children" in exp:
                     exp["children"] *= 1 - CHILD_DISCRETIONARY * f
+                if oth:
+                    exp["budget:other_unrecorded"] = oth * (1 - o_share * f)
                 squeeze = cut
+                recurring = sum(exp.values())
+                total_out = recurring + sum(one_off.values())
+                saving = net - total_out
+        # beyond what a household can borrow unsecured (credit cards, overdrafts: a share
+        # of a year's income), everything but housing, care, health and loans is cut
+        limit = 0.0 if retired else BORROW_LIMIT * max(net, 0.0)
+        avail = grow_cash(cash) + invest * (1 + r_inv_t) + saving
+        if avail < -limit:
+            keys = [k for k in exp if k.startswith("budget:") or k in (
+                "children", "cars", "public_transport", "emergencies")]
+            pool = sum(exp[k] for k in keys)
+            cut = min(-limit - avail, SUBSIST_CUT * pool)
+            if cut > 0 and pool > 0:
+                f = cut / pool
+                for k in keys:
+                    exp[k] *= 1 - f
+                squeeze += cut
                 recurring = sum(exp.values())
                 total_out = recurring + sum(one_off.values())
                 saving = net - total_out
@@ -1256,7 +1711,21 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
             "cash": cash, "invest": invest, "liquid": cash + invest, "home_value": home_value
             if owned else 0.0, "mortgage_balance": mort_bal if owned else 0.0,
             "mortgage_interest": interest, "mortgage_rate": mort_rate * 100 if owned else 0.0,
+            "student_loan_balance": max(sl_bal, 0.0),
+            "_pfac": pfac, "_exp": {k: v for k, v in exp.items() if v > 0},
         })
+    # own cost-of-living index: chained, last year's spending as the weights
+    ci = [1.0]
+    for a, b in zip(rows[:-1], rows[1:]):
+        w = {k: v for k, v in a["_exp"].items() if k in a["_pfac"] and k in b["_pfac"] and
+             a["_pfac"][k] > 0}
+        tot = sum(w.values())
+        ci.append(ci[-1] * (sum(v * b["_pfac"][k] / a["_pfac"][k] for k, v in w.items()) /
+                            tot if tot > 0 else b["price_factor"] / a["price_factor"]))
+    for r_, c_ in zip(rows, ci):
+        r_.pop("_pfac")
+        r_.pop("_exp")
+        r_["cost_index"] = c_
     df = pd.DataFrame(rows).fillna(0.0)
     df["home_equity"] = df["home_value"] - df["mortgage_balance"]
     df["net_worth"] = df["liquid"] + df["home_equity"] + df["retirement_account"]
@@ -1282,6 +1751,13 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
     work = df[(df["gross"] > 0)]
     summary = {"retirement_age": ret_age, "horizon_age": horizon,
                "pension_nrr": nrr_tab.get(1.0, _nan0(hh.get("pension_nrr")))}
+    n10 = min(10, len(df) - 1)
+    if n10 > 0:   # %/yr over the first (up to) 10 years: own costs vs consumer prices
+        summary["own_inflation"] = 100 * ((df["cost_index"].iloc[n10] /
+                                           df["cost_index"].iloc[0]) ** (1 / n10) - 1)
+        summary["cpi_inflation"] = 100 * ((df["price_factor"].iloc[n10] /
+                                           df["price_factor"].iloc[0]) ** (1 / n10) - 1)
+        summary["own_inflation_years"] = n10
     if not ret_rows.empty:
         r0 = ret_rows.iloc[0]
         summary["pension_income_real"] = float(r0["pension_income"] / r0["price_factor"])
@@ -1306,20 +1782,23 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None) -> Result:
                             ", so living costs are cut") + (
                                 f"; in {n_ass} year(s) the state's minimum income for older "
                                 "people would have to fill the rest" if n_ass else "") + ".")
-    return Result(df, events, warnings, inp, summary)
+    return Result(df, events, warnings, inp, summary, [p for p in paths if p is not None])
 
 
 def to_display(res: Result, cd: CountryData, real: bool = True,
-               currency: str = "local") -> pd.DataFrame:
-    """Convert money columns: real (start-year prices) and/or USD / intl $ at the
+               currency: str = "local", deflator: str = "cpi") -> pd.DataFrame:
+    """Convert money columns: real (start-year prices; deflator "cpi" = consumer prices,
+    "own" = what the household's own spending costs) and/or USD / intl $ at the
     start-year exchange rate / PPP (held constant)."""
     df = res.years.copy()
     skip = {"t", "year", "age1", "age2", "married", "n_children", "owned", "price_factor",
+            "cost_index",
             "us_method", "unemployment_months", "local_tax_rate", "saving_rate",
             "budget_scale", "leave_months", "mortgage_rate", "child_penalty_factor",
             "retired"}
     money = [c for c in df.columns if c not in skip and pd.api.types.is_numeric_dtype(df[c])]
-    div = df["price_factor"] if real else 1.0
+    div = (df["cost_index"] if deflator == "own" and "cost_index" in df else
+           df["price_factor"]) if real else 1.0
     conv = {"local": 1.0, "USD": cd.lcu_per_usd.value, "intl$": cd.lcu_per_intl.value}[currency]
     for c in money:
         df[c] = df[c] / div / conv

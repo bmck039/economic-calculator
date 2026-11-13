@@ -144,6 +144,12 @@ class CountryData:
     inflation_outlook: dict = field(default_factory=dict)  # 5y breakeven, 5y5y forward
     portfolio: dict = field(default_factory=dict)     # portfolio.csv row: deposit_share,
     #                                                   equity_share, overnight_share
+    cohort: Optional[object] = None                   # cohort.CohortData (same birth years
+    #                                                   followed across surveys)
+    spending_level: Optional[Sourced] = None          # calibrated level of the survey
+    #                                                   basket (econsim.calibrate)
+    start_wealth: Optional[object] = None             # DataFrame: what families of each
+    #                                                   age hold now (US: SCF)
 
 
 @dataclass
@@ -156,6 +162,8 @@ class Earner:
     job: Optional[str] = None        # situation now: FT_grad (full time, job needs the
     #                                  degree) / FT_nongrad / PT / U (looking); None ->
     #                                  today's mix for the age and degree (US: CPS)
+    pay_path: Optional[tuple] = None  # gross pay per YEAR, nominal, from the start
+    #                                  (backtests: what it actually was); overrides all
     pay_now: Optional[float] = None  # gross pay per month now (local); sets the place in
     #                                  the pay distribution, kept over the career
 
@@ -197,6 +205,9 @@ class Plan:
     #                                  None -> the real wage growth (constant price-to-income)
     rent: Optional[float] = None     # monthly, local; None -> data default
     budget_scale: float = 1.0        # lifestyle multiplier on the survey budget
+    spending_level: Optional[float] = None  # the country's calibrated level of the survey
+    #                                  basket (None -> spending_level.csv; 1 without)
+    spending_fit: bool = True        # use the calibrated level (False while fitting it)
     emergency_annual_cost: Optional[float] = None  # None -> 1 unexpected expense / yr
     emergency_fund_months: float = 6.0
     job_loss: Optional[JobLoss] = None
@@ -247,7 +258,24 @@ class Plan:
     ltc_cost: Optional[float] = None  # per year, today's money; None -> country default
     us_citizens: bool = True
     us_employer: bool = False        # True -> US FICA where no totalization agreement
-    starting_savings: float = 0.0
+    starting_savings: Optional[float] = None  # bank + investments now (local); None ->
+    #                                  what renting couples of P1's age and degree typically
+    #                                  hold (US: SCF; elsewhere 0)
+    starting_retirement: Optional[float] = None  # retirement accounts now (401k, IRA);
+    #                                  None -> typical for the age (US: SCF; elsewhere 0)
+    own_home: Optional[bool] = None  # already own the home at the start; None -> yes if
+    #                                  the planned buying age is reached and owners
+    #                                  of that age are surveyed (US: SCF), else no
+    home_value_now: Optional[float] = None   # None -> owners of that age (US: SCF median)
+    mortgage_now: Optional[float] = None     # balance; None -> owners of that age (SCF)
+    mortgage_rate_now: Optional[float] = None  # % on the existing loan; None -> the
+    #                                  average rate on outstanding US mortgages
+    mortgage_years_left: Optional[int] = None  # None -> term less years since a typical
+    #                                  purchase
+    cohort_effects: str = "history"  # how far a cohort's gap to the people before it at
+    #                                  the same age lasts: "history" (as much as it has
+    #                                  lasted in past surveys) | "full" | "off" (each age
+    #                                  bracket's people today show where you'll be)
     # ---- realism options --------------------------------------------------------------
     cars: Optional[int] = None       # cars owned; None -> country typical
     unemployment_risk: bool = True   # deduct the expected cost of unemployment each year
@@ -259,13 +287,18 @@ class Plan:
     student_loan_rate: Optional[float] = None  # %/yr; None -> the country's main scheme
     student_loan_years: Optional[int] = None   # repayment term; None -> the scheme's
     #                                  (US standard plan 10; UK: 9% above the threshold)
+    housing_elasticity: Optional[float] = None  # rent and home price vs income relative
+    #                                  to the survey couple; None -> calibrated
+    car_elasticity: Optional[float] = None  # car costs vs the same; None -> calibrated
+    wealth_mpc: Optional[float] = None  # share of savings above the emergency fund spent
+    #                                  each year before retirement; None -> calibrated
     budget_elasticity: float = 0.8   # spending rises with income^elasticity relative to the
-    #                                  survey couple (calibrated on Eurostat saving by age)
+    #                                  survey couple (< 1: richer households save a larger
+    #                                  share - Dynan, Skinner & Zeldes 2004; backtest: 0.8-1)
     survey_correction: Optional[float] = None  # share (exponent) of the national-
     #                                  accounts gap in survey spending added back; None ->
-    #                                  0.5 where the country's own gap is measured (EU
-    #                                  budget surveys, US CE vs BEA; fits hardship surveys
-    #                                  best), 0 where it would only be estimated
+    #                                  all of it (fits what US couples accumulated and the
+    #                                  national saving rates: econsim.backtest, .calibrate)
     child_penalty: bool = True       # primary parent works the country's typical hours
     #                                  while children are young (employment x hours of
     #                                  mothers vs women without children)

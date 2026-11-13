@@ -146,7 +146,8 @@ with sb.expander("👫 Partners & career", expanded=True):
         def _mix(a, e):
             m = CAR.mix(a, e)
             return ", ".join(f"{job_lbl[k].lower()} {v:.0%}" for k, v in m.items())
-        mix_help = (f" Today (CPS, {CAR.window}), people your age with your degree who work "
+        mix_help = (f" Today ({'CPS ' + CAR.window if CAR.measured_moves else 'national LFS'})"
+                    ", people your age with your degree who work "
                     f"or look for work: P1 {_mix(int(a1), d1)}; P2 {_mix(int(a2), d2)}.")
     j1 = c1.selectbox("P1 now", job_opts, format_func=job_lbl.get, key=K("j1"),
                       help="Your situation today. 'Typical' = today's mix for people of your "
@@ -162,14 +163,17 @@ with sb.expander("👫 Partners & career", expanded=True):
     career_on = CAR is not None and st.checkbox(
         "Careers follow today's job market", True,
         help="Each year a partner can be full time in a job that needs a degree, full time "
-             "in one that doesn't, part time, or looking for work. The model starts from "
-             "today's mix for your age and degree (or your situation), moves it on with the "
-             "year-on-year moves people of your age and degree make now (the same CPS "
-             "households a year apart; switches between the two kinds of full-time job "
-             "calibrated to Strada / Burning Glass: 73% of graduates who start "
-             "underemployed still are 10 years later), and pays each situation what it "
-             "pays now. Raises: what workers of each age get now (the same workers a year "
-             "apart) beyond economy-wide wage growth. Off: full-time earnings by age.")
+             "in one that doesn't, part time, or looking for work - the same model in every "
+             "country. Starting from the typical mix you have, at each age, the mix of "
+             "people that age today (surveys show no lasting generation gaps in "
+             "unemployment or full-time work). Starting from your own situation, the "
+             "difference closes as fast as people really move (US CPS households a year "
+             "apart; underemployment as sticky as Strada / Burning Glass measured: 73% of "
+             "graduates who start underemployed still are 10 years later). Mix: US CPS; "
+             "elsewhere unemployment by age and degree, the part-time share and graduates "
+             "in lower-level jobs from the national LFS. Pay grows as your generation's "
+             "full-time pay (today's age brackets + the gap that lasts). Off: full-time "
+             "earnings by age.")
     jm = st.radio("Job market ahead", ["Stays as it is now", "Keeps changing as in the last "
                                        "year (5 more years)"], disabled=not career_on,
                   help="Keeps changing: the change in year-on-year moves between the prior "
@@ -196,11 +200,18 @@ with sb.expander("👫 Partners & career", expanded=True):
     horizon = st.slider("Simulate until P1 age", int(a1) + 5, 105, horizon_d, key=K("hz"),
                         help=src(hz, "{:g}") + " The pension is paid from the retirement age, "
                              "indexed to prices; savings are drawn down slowly.")
-    savings0 = st.number_input(f"Current savings ({cd.currency})", 0.0, 1e9, 0.0, 1000.0,
-                               key=K("sav0"))
+    coh_opts = {"history": "As much as gaps have lasted in past surveys",
+                "full": "The whole gap lasts", "off": "None (today's age brackets)"}
+    coh_mode = st.radio(
+        "How far our generation's gap to the one before us lasts", list(coh_opts),
+        format_func=coh_opts.get, key=K("coh"),
+        help="People of your age now vs people 10 years older when they were your age "
+             "(pay relative to all workers; wealth; unemployment). History (US: CPS ASEC "
+             "every year since 2003, SCF since 1989) says how much of such a gap is still "
+             "there years later; the rest closes as you reach today's older brackets.")
     if career_on:
-        st.caption(f"Careers: CPS microdata {CAR.window} (Census API) - situations, pay, "
-                   "year-on-year moves and raises for your age and degree.")
+        st.caption(f"Careers: {CAR.source} ({CAR.window}) - situations and pay for your "
+                   "age and degree.")
     else:
         st.caption(f"Earnings: {cd.earnings_src.label}{flag(cd.earnings_src)}. "
                    f"{cd.earnings_src.note[:160]}")
@@ -265,9 +276,14 @@ with sb.expander("🏡 Housing"):
                            help=src(cd.rent))
     buy_age = st.number_input("Buy at P1 age", 18, 90, max(int(a1), 30),
                               disabled=mode != "Buy a home")
-    price = st.number_input(f"Home price today ({cd.currency})", 0.0, 1e9,
-                            float(round(cd.home_price.value, -3)), 5000.0, key=K("hp"),
-                            help=src(cd.home_price))
+    HP_ = resolve(Plan(country=iso, earners=(Earner(int(a1), education=d1),
+                                             Earner(int(a2), education=d2)),
+                       buy_house_age=int(buy_age)), cd)["home_price"]
+    hp_d = float(round(HP_["value"], -3))
+    price = st.number_input(f"Home price today ({cd.currency})", 0.0, 1e9, hp_d, 5000.0,
+                            key=K(f"hp{d1}{d2}{int(buy_age)}"),
+                            help=HP_["source"] + " Prices follow the house-price outlook "
+                            "below until you buy.")
     c1, c2 = st.columns(2)
     dp = c1.number_input("Down payment %", 0.0, 100.0, float(round(cd.down_payment_pct.value, 1)),
                          0.5, key=K("dp"), help=src(cd.down_payment_pct, "{:.1f}"))
@@ -349,8 +365,44 @@ with sb.expander("🚨 Emergencies & job loss"):
             f"{m} mo {s.value:.0f}%" for m, s in sorted(cd.nrr.items())))
 
 # defaults the engine would use for the primary country (rates, portfolio, loans)
-D_ = resolve(Plan(country=iso, earners=(Earner(int(a1), p1, g1, education=d1),
-                                        Earner(int(a2), p2, g2, education=d2))), cd)
+_buy = int(buy_age) if mode == "Buy a home" else None
+_E = (Earner(int(a1), p1, g1, education=d1), Earner(int(a2), p2, g2, education=d2))
+D_ = resolve(Plan(country=iso, earners=_E, buy_house_age=_buy), cd)
+
+with sb.expander("💰 What we have now"):
+    own_d = bool(D_["own_home"]["value"])
+    own = st.checkbox("We already own our home", own_d, key=K(f"own{a1}{d1}{_buy}"),
+                      help=D_["own_home"]["source"])
+    DW = resolve(Plan(country=iso, earners=_E, buy_house_age=_buy, own_home=own), cd)
+
+    def _wnum(label, k, step=1000.0, fmt=None):
+        d = float(DW[k]["value"])
+        v = st.number_input(label, 0.0, 1e9, d, step, key=K(f"{k}{a1}{d1}{own}"),
+                            help=DW[k]["source"] + (f" ({DW[k]['note']})"
+                                                    if DW[k].get("note") else ""))
+        return v, d
+    savings0, sav_d = _wnum(f"Savings: bank + investments ({cd.currency})",
+                            "starting_savings")
+    ret0, ret_d0 = _wnum(f"Retirement accounts ({cd.currency})", "starting_retirement")
+    if own:
+        hv0, hv_d = _wnum(f"Home value ({cd.currency})", "home_value_now", 5000.0)
+        mb0, mb_d = _wnum(f"Mortgage left ({cd.currency})", "mortgage_now", 5000.0)
+        mr0 = st.number_input("Rate on our mortgage %", 0.0, 20.0,
+                              float(round(DW["mortgage_rate_now"]["value"], 2)), 0.05,
+                              key=K(f"mr0{own}"), help=DW["mortgage_rate_now"]["source"])
+        my0 = st.number_input("Years left on it", 0, 40,
+                              int(DW["mortgage_years_left"]["value"]), 1,
+                              key=K(f"my0{a1}{own}"),
+                              help=DW["mortgage_years_left"]["source"])
+    _sw_src = DW["starting_savings"].get("source", "")
+    st.caption("Defaults: what families of your age " + (
+        "and degree hold now (Federal Reserve Survey of Consumer Finances, "
+        f"{DW['starting_savings'].get('year', '')})." if iso == "USA" and
+        DW["starting_savings"].get("year") else
+        f"hold (ECB Household Finance and Consumption Survey, "
+        f"{DW['starting_savings'].get('year', '')}; all households, by age only)."
+        if "HFCS" in _sw_src else
+        "- no survey of wealth by age is loaded for this country, so enter yours."))
 
 with sb.expander("🎓 Student debt"):
     sd = cd.student_debt or {}
@@ -383,12 +435,13 @@ with sb.expander("🧾 Other costs & options"):
     church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
                          disabled=iso != "DEU")
     priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
-    elast = st.slider("How much spending follows income", 0.0, 1.0, 0.8, 0.05,
+    elast = st.slider("How much spending follows income", 0.0, 1.5, 0.8, 0.05,
                       help="Living costs = survey couple's budget x (your income after housing"
                            " / theirs, both growing with average wages)^this. 0 = always "
-                           "the survey average; 1 = proportional. 0.8 matches how saving "
-                           "rates rise with age in Eurostat's saving-by-age data.")
-    surv_d = 0.5 if cd.budget_coverage_measured else 0.0
+                           "the survey average; 1 = proportional. The default 0.8 fits best what "
+                           "couples actually accumulated in both backtests (US: SCF "
+                           "households; euro area: HFCS tables).")
+    surv_d = 1.0
     surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, surv_d, 0.05,
                      key=K("surv"),
                      help="Household budget surveys record less than national accounts "
@@ -396,11 +449,10 @@ with sb.expander("🧾 Other costs & options"):
                           "Eurostat budget surveys vs national accounts, US Consumer "
                           "Expenditure Survey vs BEA consumption). 1 = scale each category up "
                           "to the national-accounts level; 0 = raw survey. Part of the gap is "
-                          "the very rich, non-profits and the informal economy, so the "
-                          "default adds back half of it where this country's gap is "
-                          "measured (it matches how many couples report struggling to make "
-                          "ends meet best), and none where it would only be estimated "
-                          "(e.g. the UK).")
+                          "the very rich, non-profits and the informal economy, but the "
+                          "default adds back all of it: with it, couples accumulate about what "
+                          "they really did (backtests on the Fed's SCF and the ECB's HFCS) "
+                          "and each country saves its national household saving rate.")
 
 with sb.expander("👪 Family help & later life"):
     c1, c2 = st.columns(2)
@@ -522,6 +574,14 @@ with sb.expander("📈 Returns, growth & display"):
     rwg = c2.number_input("Real wage growth %/yr (economy-wide)", -3.0, 5.0, round(rwg_d, 2),
                           0.05, key=K(f"rwg{w_out}"), help=src(rwg_src, "{:.2f}"))
     real = st.toggle("Show in today's money (real)", True)
+    defl = st.radio("Today's money means", ["cpi", "own"], horizontal=True, key=K("defl"),
+                    format_func={"cpi": "Consumer prices (CPI)",
+                                 "own": "What our own spending costs"}.get,
+                    disabled=not real,
+                    help="CPI: the national basket. Own: your household's own basket "
+                         "year by year - your rent at market trends, your mortgage (fixed "
+                         "payments do not rise), and each budget line at its own price "
+                         "trend - like the UK's Household Costs Indices.")
     cur = st.radio("Currency", ["local", "USD", "intl$"], horizontal=True,
                    format_func={"local": f"Local ({cd.currency})", "USD": "USD",
                                 "intl$": "Intl $ (PPP)"}.get)
@@ -587,14 +647,27 @@ def build_plan(iso3: str, override: bool) -> Plan:
         cash_return=cash_r if override and abs(cash_r - cash_d) > 1e-9 else None,
         inflation=infl if override and abs(infl - infl_d) > 1e-9 else None,
         us_citizens=us_cit,
-        us_employer=us_emp, starting_savings=float(savings0) if override else
-        float(savings0) / cd.lcu_per_intl.value * ds.country(iso3).lcu_per_intl.value)
+        us_employer=us_emp, cohort_effects=coh_mode,
+        starting_savings=(float(savings0) if abs(savings0 - sav_d) > 1e-9 else None)
+        if override else float(savings0) / cd.lcu_per_intl.value *
+        ds.country(iso3).lcu_per_intl.value,
+        starting_retirement=(float(ret0) if abs(ret0 - ret_d0) > 1e-9 else None)
+        if override else float(ret0) / cd.lcu_per_intl.value *
+        ds.country(iso3).lcu_per_intl.value,
+        own_home=own if override else False)
+    if override and own:
+        p = replace(p, home_value_now=float(hv0) if abs(hv0 - hv_d) > 1e-9 else None,
+                    mortgage_now=float(mb0) if abs(mb0 - mb_d) > 1e-9 else None,
+                    mortgage_rate_now=float(mr0) if abs(
+                        mr0 - round(DW["mortgage_rate_now"]["value"], 2)) > 1e-9 else None,
+                    mortgage_years_left=int(my0) if int(my0) != int(
+                        DW["mortgage_years_left"]["value"]) else None)
     if override:
         # pass a value only when the user changed it, so provenance stays on defaults
         def ov(val, default, nd=0):
             return None if abs(val - round(default, nd)) < 1e-9 else val
         p = replace(p, wedding_cost=ov(wedding, cd.wedding_cost.value, -2),
-                    home_price=ov(price, cd.home_price.value, -3),
+                    home_price=ov(price, hp_d, -3),
                     down_payment_pct=ov(dp, cd.down_payment_pct.value, 1),
                     transfer_tax_pct=ov(tt, cd.transfer_tax_pct.value, 9),
                     mortgage_rate=ov(mr, cd.mortgage_rate.value, 2),
@@ -616,7 +689,7 @@ us = ds.us_params()
 plan = build_plan(iso, True)
 cd_run = country_with_overrides(cd)
 res = simulate(plan, cd_run, us)
-disp = to_display(res, cd_run, real, cur)
+disp = to_display(res, cd_run, real, cur, defl)
 CUR = {"local": cd.currency, "USD": "USD", "intl$": "intl $"}[cur]
 money_note = ("today's money" if real else "nominal") + f", {CUR}"
 
@@ -637,6 +710,14 @@ kc[0].metric("Household net income now", f"{d0['net_income'] / 12:,.0f}/mo",
 kc[1].metric("Spending now", f"{d0['expenses_recurring'] / 12:,.0f}/mo")
 kc[2].metric("Saving now", f"{d0['saving'] / 12:,.0f}/mo",
              f"{d0['saving_rate'] * 100:.0f}% of net")
+if res.summary.get("own_inflation") is not None:
+    hc = res.inputs.get("household_costs_5y")
+    st.caption(
+        f"Your own inflation over the next {res.summary['own_inflation_years']} years: "
+        f"{res.summary['own_inflation']:.2f}%/yr (your rent or mortgage and each budget line "
+        f"at its own price trend) vs {res.summary['cpi_inflation']:.2f}%/yr consumer prices."
+        + (f" Over the last 5 years what US households pay for housing and everything else "
+           f"rose {hc['value']:.1f}%/yr - see the inputs table." if hc else ""))
 conv = {"local": 1.0, "USD": cd.lcu_per_usd.value, "intl$": cd.lcu_per_intl.value}[cur]
 S_ = res.summary
 ra_ = S_.get("retirement_age", retire)

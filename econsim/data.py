@@ -61,6 +61,11 @@ class DataStore:
         self.portfolio = rd("portfolio")
         self.us_career = rd("us_career")
         self.price_outlook = rd("price_outlook")
+        self.cohort = rd("cohort")
+        self.part_time = rd("part_time")
+        self.spending_lvl = rd("spending_level")
+        self.start_wealth = rd("start_wealth")
+        self._cohort_fits: dict = {}
         if not self.snap.empty:
             COUNTRY_NAMES.update(dict(zip(self.snap["iso3"], self.snap["country"])))
 
@@ -270,7 +275,18 @@ class DataStore:
         cd = replace(cd, **upd)
         cd = replace(cd, budget_ref_income=self._budget_ref_income(iso3, cd))
         cd = replace(cd, budget_ref_housing=self._budget_ref_housing(iso3, cd))
+        if cd.career is None and not self.us_career.empty:
+            from .career import from_country
+            pt = self.part_time[self.part_time["iso3"] == ("CHE" if iso3 == "LIE" else iso3)] \
+                if not self.part_time.empty else self.part_time
+            cd = replace(cd, career=from_country(cd, self._us_career(), pt, self.part_time))
         return cd
+
+    def _us_career(self):
+        if not hasattr(self, "_usc"):
+            from .career import CareerData
+            self._usc = CareerData.from_table(self.us_career)
+        return self._usc
 
     def labour_history(self, iso3: str, indicator: str, band: str, edu: str) -> pd.DataFrame:
         """Yearly values of one labour_market cell (for charts)."""
@@ -444,8 +460,7 @@ class DataStore:
                 out["portfolio"] = {k: v for k, v in pf.iloc[0].to_dict().items()
                                     if not _nan(v)}
         if iso3 == "USA" and not self.us_career.empty:
-            from .career import CareerData
-            out["career"] = CareerData.from_table(self.us_career)
+            out["career"] = self._us_career()
         if not self.price_outlook.empty:
             po = self.price_outlook[self.price_outlook["iso3"] ==
                                     ("CHE" if iso3 == "LIE" else iso3)]
@@ -455,11 +470,53 @@ class DataStore:
             out["inflation_outlook"] = {str(r.item): (float(r.value), str(r.period),
                                                      str(r.source))
                                         for r in po.itertuples()
-                                        if str(r.item).startswith("inflation_")}
+                                        if str(r.item).startswith(("inflation_", "hci_",
+                                                                   "cpi_"))}
+        if not self.spending_lvl.empty:
+            r = self.spending_lvl[self.spending_lvl["iso3"] == iso3]
+            if not r.empty:
+                out["spending_level"] = Sourced(
+                    float(r["spending_level"].iloc[0]), "x", str(r["source"].iloc[0]),
+                    None, True, "B",
+                    f"the population then saves {r['saving_model'].iloc[0]:.1f}% "
+                    f"(national accounts: {r['saving_national'].iloc[0]:.1f}%)"
+                    if "saving_model" in r and r["saving_model"].notna().iloc[0] else "")
+        coh = self._cohort(iso3)
+        if coh is not None:
+            out["cohort"] = coh
+        if not self.start_wealth.empty and (self.start_wealth["iso3"] == iso3).any():
+            out["start_wealth"] = self.start_wealth[self.start_wealth["iso3"] == iso3]
         out["wage_trend"] = self._trend_wage(iso3)
         out["home_trend"] = self._trend_index(iso3, "home_price", cd)
         out["rent_trend"] = self._trend_index(iso3, "rent", cd)
         return out
+
+    def _cohort(self, iso3: str):
+        """Cohort series for the country; how long gaps last (phi) is estimated on the
+        US surveys (CPS ASEC every year, SCF every 3 years) and, for Europe's LFS, pooled
+        over all European countries. SES earnings (every 4 years, 10-year bands) cannot
+        measure it themselves and use the US estimate for earnings."""
+        from .cohort import CohortData, fit_all
+        c = self.cohort
+        if c.empty:
+            return None
+        t = c[c["iso3"] == ("CHE" if iso3 == "LIE" else iso3)]
+        if t.empty:
+            return None
+        if "us" not in self._cohort_fits:
+            us = c[c["iso3"] == "USA"]
+            self._cohort_fits["us"] = fit_all(us) if not us.empty else {}
+            eu = c[(c["iso3"] != "USA") & (c["measure"] == "unemp")]
+            self._cohort_fits["eu"] = fit_all(eu) if not eu.empty else {}
+        if iso3 == "USA":
+            return CohortData.from_table(t, fits=self._cohort_fits["us"])
+        fits = dict(self._cohort_fits["eu"])
+        borrow = {}
+        if "earn_ftyr" in self._cohort_fits["us"]:
+            borrow["earn_ses"] = ("estimated on US CPS ASEC full-time pay: SES waves are "
+                                  "too few and too coarse to measure it",
+                                  self._cohort_fits["us"]["earn_ftyr"])
+        return CohortData.from_table(t, fits=fits, borrow=borrow)
 
     def _trend_wage(self, iso3: str, years: int = 20) -> Optional[Sourced]:
         r = self.rwh[(self.rwh["iso3"] == iso3) & (self.rwh["measure"] == "avg_wage")] \

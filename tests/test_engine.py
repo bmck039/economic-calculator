@@ -47,7 +47,10 @@ def country(**kw) -> CountryData:
 def plan(**kw) -> Plan:
     base = dict(country="TST", earners=(Earner(28), Earner(27)), horizon_age=60,
                 marriage_age=None, child_ages=(None, None), buy_house_age=None,
-                inflation=2.0, real_wage_growth=1.0, return_nominal=5.0, us_citizens=False)
+                inflation=2.0, real_wage_growth=1.0, return_nominal=5.0, us_citizens=False,
+                # mechanism tests: the calibrated behaviour held neutral (own tests below)
+                wealth_mpc=0.0, housing_elasticity=0.0, car_elasticity=0.0,
+                budget_elasticity=0.8)
     base.update(kw)
     return Plan(**base)
 

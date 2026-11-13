@@ -58,12 +58,19 @@ def test_more_rent_less_wealth_and_more_pay_more_wealth(ds):
             y = run(ds, p, c).years
             return y.loc[~y["retired"].astype(bool), "net_worth"].iloc[-1] - \
                 y["old_age_assistance"].sum()
-        p = base(iso, buy_house_age=None, horizon_age=None)
+        # couples without children, who save (with children many live pay cheque to pay
+        # cheque, and then more rent means less spending, not less wealth)
+        p = base(iso, buy_house_age=None, horizon_age=None, rent=cd.rent.value,
+                 child_ages=(None, None))
         hi_rent = replace(p, rent=cd.rent.value * 1.3)
-        assert nw(hi_rent) < nw(p), iso
+        # a couple living pay cheque to pay cheque cuts other spending instead: no richer
+        assert nw(hi_rent) <= nw(p) + 0.01 * abs(nw(p)) + 1000, iso
         if "p75" in cd.earnings:
             rich = replace(p, earners=(Earner(23, "p75"), Earner(24, "p75")))
             assert nw(rich) > nw(p), iso
+            # a couple that saves (modest lifestyle): strictly less
+            saver = replace(rich, budget_scale=0.6)
+            assert nw(replace(saver, rent=cd.rent.value * 1.3)) < nw(saver), iso
 
 
 def test_purchase_event_matches_ownership(ds):
@@ -99,7 +106,9 @@ def test_saving_rate_does_not_trend_with_economic_growth_alone(ds):
 def test_pension_only_keeps_savings_and_households_hold_deposits(ds):
     for iso in ("DEU", "USA", "POL"):
         cd = ds.country(iso)
-        p = base(iso, horizon_age=None)
+        # a couple with savings to spend down (modest lifestyle)
+        p = base(iso, horizon_age=None, earners=(Earner(23, "p75"), Earner(24, "p75")),
+                 budget_scale=0.6)
         down, keep = run(ds, p, cd), run(ds, replace(p, spend_down=False), cd)
         old = down.years["retired"].astype(bool)
         assert keep.years["net_worth"].iloc[-1] > down.years["net_worth"].iloc[-1], iso
@@ -109,6 +118,10 @@ def test_pension_only_keeps_savings_and_households_hold_deposits(ds):
         inp = down.inputs
         assert 5 < inp["deposit_share"]["value"] < 95, iso
         assert inp["deposit_return"]["value"] < inp["return_nominal"]["value"], iso
+        # (a couple with savings, without the wealth effect that spends them)
+        p = replace(p, wealth_mpc=0.0, starting_savings=200_000.0)
+        down = run(ds, p, cd)
         all_in = run(ds, replace(p, deposit_share=0.0,
                                  equity_share=inp["equity_share"]["value"] / 100), cd)
-        assert all_in.years["net_worth"].iloc[-1] > down.years["net_worth"].iloc[-1], iso
+        at_ret = lambda y: y.loc[~y["retired"].astype(bool), "net_worth"].iloc[-1]  # noqa
+        assert at_ret(all_in.years) > at_ret(down.years), iso
