@@ -113,6 +113,34 @@ def test_spending_levels_reproduce_national_saving(ds):
     assert (abs(ok["saving_model"] - ok["saving_national"]) < 0.6).mean() > 0.9
 
 
+def test_richer_couples_save_a_larger_share(ds):
+    """Spending follows income in proportion below the survey couple's income and less
+    above it: the saving rate rises with income above the middle."""
+    from econsim.model import Plan
+    cd, us = ds.country("USA"), ds.us_params()
+
+    def rate(pct, **kw):
+        p = Plan("USA", (Earner(35, pct), Earner(35, pct)), horizon_age=40,
+                 buy_house_age=None, child_ages=(None, None), **kw)
+        r = simulate(p, cd, us).years.iloc[2]
+        return r["saving"] / r["net_income"]
+    assert rate("p90") > rate("median") + 0.05
+    # one elasticity for all incomes (the old model): the top saves less
+    assert rate("p90", budget_elasticity_high=1.0) < rate("p90") - 0.05
+
+
+def test_portfolio_moves_toward_the_sector_as_savings_grow(ds):
+    from econsim.model import Plan
+    cd, us = ds.country("USA"), ds.us_params()
+
+    def share(**kw):
+        p = Plan("USA", (Earner(45), Earner(45)), horizon_age=48, buy_house_age=None,
+                 starting_savings=1_500_000.0, **kw)
+        y = simulate(p, cd, us).years
+        return (y["invest"] / y["liquid"]).iloc[1]
+    assert share() > share(portfolio_wealth_k=0.0) + 0.05
+
+
 def test_backtest_wealth_and_ownership(ds):
     """SCF couples started in past waves, run through what happened: unbiased against
     the same birth years later (small sample here; the full one is in the README)."""
@@ -123,6 +151,10 @@ def test_backtest_wealth_and_ownership(ds):
     sc = score(c)
     assert abs(sc["wealth_bias"]) < 0.6           # years of the cohort's median wages
     assert abs(sc["own_bias_pp"]) < 8
+    # the spread within each generation, not only its middle
+    for k in ("p25", "p75", "low", "high"):
+        assert c[f"{k}_err"].notna().mean() > 0.9, k
+    assert abs(sc["p75_bias"]) < 2.5 and abs(sc["high_bias"]) < 2.0
 
 
 # ------------------------------------------------------------------ Europe: HFCS tables

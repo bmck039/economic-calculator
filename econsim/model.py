@@ -292,9 +292,17 @@ class Plan:
     car_elasticity: Optional[float] = None  # car costs vs the same; None -> calibrated
     wealth_mpc: Optional[float] = None  # share of savings above the emergency fund spent
     #                                  each year before retirement; None -> calibrated
-    budget_elasticity: float = 0.8   # spending rises with income^elasticity relative to the
-    #                                  survey couple (< 1: richer households save a larger
-    #                                  share - Dynan, Skinner & Zeldes 2004; backtest: 0.8-1)
+    budget_elasticity: float = 1.0   # spending rises with income^elasticity relative to the
+    #                                  survey couple, below its income (backtest: 1.0 -
+    #                                  below the middle, saving does not rise with income)
+    budget_elasticity_high: Optional[float] = None  # the same above the survey couple's
+    #                                  income; None -> calibrated (0.4: richer households
+    #                                  save a larger share - Dynan, Skinner & Zeldes 2004)
+    portfolio_wealth_k: Optional[float] = None  # savings (years of income) at which the
+    #                                  mix is halfway from typical households' to the whole
+    #                                  sector's; None -> calibrated
+    wealth_mpc_decline: Optional[float] = None  # how fast the share of savings spent
+    #                                  falls as savings grow vs income; None -> calibrated
     survey_correction: Optional[float] = None  # share (exponent) of the national-
     #                                  accounts gap in survey spending added back; None ->
     #                                  all of it (fits what US couples accumulated and the

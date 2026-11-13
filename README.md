@@ -157,7 +157,8 @@ below 138% / 200% of the poverty line. Births trigger the country's parental lea
 afterwards the main parent works the country's typical employment rate × hours of mothers.
 Living costs are the survey couple's basket raised to national-accounts household
 consumption category by category, times the country's calibrated spending level, scaled by
-(income after housing / the survey couple's)^0.8; rent, the home a buyer can afford
+(income after housing / the survey couple's)^1.0 below the survey couple's income and
+^0.4 above it (richer households save a larger share of each extra dollar); rent, the home a buyer can afford
 (^0.75) and car costs (^0.25) follow income before housing; children add per-person
 spending (OECD-modified scale), childcare until free pre-school. Before retirement 4% of
 savings above the emergency fund is spent each year (not by renters saving for a home). When money runs short, discretionary
@@ -167,7 +168,8 @@ payment, taxes and fees are saved (keeping 6 months' buffer) and the loan fits t
 country's lending limits; owned homes follow the (repeat-sales) price index, which already
 includes their ageing; US and Danish owners refinance when new loans cost a point less. Savings above a 6-month
 emergency fund are held as TYPICAL households hold theirs (the bottom 70% by wealth: ECB
-Distributional Wealth Accounts, US SCF): part in bank deposits at the rates banks pay, the
+Distributional Wealth Accounts, US SCF), moving toward the whole household sector's mix
+(more in shares, fewer deposits) as savings grow - halfway at a year's income: part in bank deposits at the rates banks pay, the
 rest invested at today's 10-year yield + the share in shares × a 3.5% equity premium − fees
 − the country's tax drag, the share in stocks falling to half by retirement. From the
 retirement age for today's young workers, each partner gets a pension (career-average pay
@@ -266,25 +268,52 @@ That backtest found, and fixed, what a forward-looking check cannot see:
 
 How strongly spending follows income (the budget elasticity) is fitted on both backtests
 at once - this one and Europe's below - refitting every country's spending level to its
-national saving rate at each value:
+national saving rate at each value. With one elasticity for every income, the model's
+households ended up too alike: the top quarter of each cohort, and the top third by
+earnings, held far less than the survey's (a couple in the top 10% of pay saved almost
+nothing). So the backtest also compares the spread within each cell - the 25th and 75th
+percentiles of wealth, and the median of the bottom and top third by wages - and the
+elasticity may differ below and above the survey couple's income (wealth in years of the
+cohort's median wages; spread = mean absolute error of those four):
 
-| Elasticity | US wealth bias / MAE | degree / no degree | Europe wealth bias / MAE |
-|---|---|---|---|
-| 0.6 | −0.54 / 0.84 | −0.61 / −0.48 | +0.17 / 0.91 |
-| **0.8 (default)** | −0.36 / **0.78** | −0.60 / −0.11 | +0.28 / **0.89** |
-| 1.0 | −0.27 / 0.78 | −0.59 / +0.07 | +0.41 / 0.91 |
+| Below / above | US median bias / MAE | top quarter | top third by pay | spread | degree / no degree | Europe bias / MAE |
+|---|---|---|---|---|---|---|
+| 0.8 / 0.8 (v0.6) | −0.36 / 0.78 | −1.36 | −0.79 | 1.31 | −0.60 / −0.11 | +0.28 / 0.89 |
+| 0.6 / 0.6 | −0.54 / 0.84 | −1.37 | −0.65 | 1.41 | −0.61 / −0.48 | +0.17 / 0.91 |
+| 0.8 / 0.4 | −0.41 / 0.77 | −1.22 | −0.48 | 1.30 | −0.59 / −0.25 | +0.24 / 0.89 |
+| 1.0 / 0.8 | −0.28 / 0.79 | −1.30 | −0.76 | 1.29 | −0.58 / +0.04 | +0.39 / 0.91 |
+| 1.0 / 0.4 | −0.29 / 0.77 | −1.12 | −0.42 | 1.27 | −0.56 / −0.03 | +0.35 / 0.90 |
+| **1.0 / 0.4, portfolios that grow with savings (default)** | **−0.27 / 0.77** | **−0.98** | **−0.27** | **1.27** | −0.52 / −0.03 | +0.35 / 0.90 |
+
+(All nine combinations of 0.6 / 0.8 / 1.0 below and 0.4 / 0.6 / 0.8 above were run; 0.6
+below is worse on every US measure.) Below the middle spending is proportional to income -
+the saving rate does not rise with income there (Straub 2019 finds ~0.7 overall); above it,
+richer households save a larger share (Dynan, Skinner & Zeldes 2004). Two more
+wealth-dependent behaviours were tested on top:
+
+* portfolios: savings held as typical households hold them, moving toward the whole
+  household sector's mix (wealth-weighted, so led by the wealthiest: more shares) as they
+  grow - halfway at 1 year's income fits better than at 3. Kept;
+* a wealth effect that falls as savings grow relative to income (Fagereng, Holm & Natvik
+  2021: wealthier households spend less of a windfall): no measurable effect (top quarter
+  −1.06 vs −1.12), as few couples hold much above the emergency fund. Not used.
 
 Result with the defaults, all 359 cells:
 
 | | Bias | Mean absolute error |
 |---|---|---|
-| Wealth (years of the cohort's median wages) | −0.36 | 0.78 (of which ~0.5 is sampling noise in the survey cells and the model's sample) |
-| Home ownership (percentage points) | −0.8 | 5.3 |
+| Wealth (years of the cohort's median wages) | −0.27 | 0.77 (of which ~0.5 is sampling noise in the survey cells and the model's sample) |
+| Home ownership (percentage points) | −0.7 | 5.3 |
+| Spread: 25th / 75th percentile | −0.02 / −0.98 | |
+| Bottom / top third by wages | −0.53 / −0.27 | |
 
-Remaining: couples with a degree end with too little (−0.6 on average, −1.1 from 55; it
-does not depend on the elasticity: high earners save more through retirement plans than
-the model's employer contributions alone), so the bias grows with the horizon (−0.24 up to
-6 years, −0.79 beyond 12); couples without a degree are on target (−0.11).
+By degree: couples with a degree −0.56 at the median, their top third by pay −0.88 (with one
+elasticity: −1.93), their top quarter of wealth −1.8 (−2.6); couples without a degree on
+target (0.00; top quarter −0.18). The bias still grows with the horizon (−0.17 up to 6
+years, −0.72 beyond 12; degree couples from 55: −0.88): the top of the wealth distribution
+also reflects inheritances, own businesses and returns above the market's, which the model
+does not have. The bottom third by wages holds about half a year's wages too little in
+every variant.
 
 ### Euro area: the HFCS tables
 
@@ -311,22 +340,22 @@ synthetic population of couples:
   occupational pensions, as the HFCS measures it).
 
 The same method on the SCF laid out as HFCS tables (`scf_tables.csv`) checks its own
-error, as the US household backtest gives the answer it should reproduce: wealth −0.42
-(households: −0.36), MAE 0.66; ownership −9.4 points (households: −0.8) - built from
+error, as the US household backtest gives the answer it should reproduce (at v0.6's
+spending defaults): wealth −0.42 (households: −0.36), MAE 0.66; ownership −9.4 points (households: −0.8) - built from
 medians, young renters hold too little to buy on time, so the table method itself reads
 ownership ~9 points low.
 
-Result, 19 countries, 276 cells (start waves 2010-2017, 3-11 years later):
+Result, 22 countries, 315 cells (start waves 2010-2017, 3-11 years later):
 
 | | Bias | Mean absolute error |
 |---|---|---|
-| Wealth (years of the cohort's median income) | +0.28 | 0.89 |
-| Home ownership (percentage points) | −3.7 (within the method's own −9) | 5.7 |
+| Wealth (years of the cohort's median income) | +0.35 | 0.90 |
+| Home ownership (percentage points) | −3.4 (within the method's own −9) | 5.3 |
 
-The error does not grow with the horizon (+0.32 up to 4 years, +0.33 at 7-11). By country
+The error does not grow with the horizon (+0.37 up to 4 years, +0.34 at 5-11). By country
 (mean error, years of income): too much in Spain (+1.4: the 2012-14 house-price fall and
-young Spaniards' weak incomes), Cyprus, Portugal (+1.0), Slovenia (+0.9); too little in
-Italy (−0.8) and Germany (−0.7) - in Italy young households' median wealth triples between
+young Spaniards' weak incomes), Cyprus, Portugal, Slovenia (+1.0); too little in
+Italy (−0.7) and Germany (−0.5) - in Italy young households' median wealth triples between
 30 and 40, from inheritances and family help the model does not have; most others within
 ±0.5.
 
@@ -341,7 +370,7 @@ big costs), as discretionary as the rest of the basket.
 | Careers | four situations, the same rules | US: CPS microdata; elsewhere national LFS shares, US pay ratios and moves |
 | Generation gaps | today's brackets + the part of the gap that lasts | US: CPS ASEC, SCF; Europe: SES earnings (persistence from the US), LFS unemployment |
 | Spending | survey basket raised to national accounts, × the country's level, the same income, housing, car and wealth responses | each country's own surveys and accounts |
-| Spending level (shown as "spending surveys do not record") | fitted so a population of couples (25-64, pay percentiles 25-75, with and without children) saves the national accounts' household net saving rate (OECD; else Eurostat gross less the median depreciation gap; at least 0%: national accounts that show households dissaving mostly miss informal income) | US 1.37, Germany 1.13, Italy 1.21, Spain 0.94, UK 0.93 (median 1.09) |
+| Spending level (shown as "spending surveys do not record") | fitted so a population of couples (25-64, pay percentiles 25-75, with and without children) saves the national accounts' household net saving rate (OECD; else Eurostat gross less the median depreciation gap; at least 0%: national accounts that show households dissaving mostly miss informal income) | US 1.48, Germany 1.19, Italy 1.25, Spain 1.03, UK 0.99 (median 1.19) |
 | Starting wealth by age | the median of households that age, owners and renters | US: SCF couples by degree; euro area: HFCS, all households by age; elsewhere enter yours |
 | Backtests | the same model and behaviour, started in past surveys | US: SCF households; euro area: HFCS tables (checked on the SCF) |
 | Savings | typical households' deposit and stock shares | ECB DWA (euro area), SCF (US); elsewhere the sector moved by the median gap |
@@ -420,7 +449,8 @@ labour force where few teenagers work.
 | `university.csv` | Household payments to tertiary institutions per student | OECD Education at a Glance |
 
 The spending defaults (the survey basket raised to national accounts in full, income
-elasticity 0.8, housing 0.75, cars 0.25, a wealth effect of 4% a year, each country's
+elasticity 1.0 below a typical couple's income and 0.4 above, portfolios that move
+toward the household sector's as savings grow, housing 0.75, cars 0.25, a wealth effect of 4% a year, each country's
 level) come from the backtest and the national saving rates above. Survey-based saving
 rates (Eurostat's experimental `icw_sr_*`, 30-50% in most countries) are not used: they
 pair surveyed incomes with surveyed spending, which surveys under-record.
@@ -487,8 +517,12 @@ the main parent (Kleven, Landais & Søgaard 2019) and years of paid long-term ca
 * Retirement: no survivor pensions or death of one partner before the horizon; pension-pot
   withdrawals are not taxed separately (the OECD net rates tax the mandatory pension only);
   basic/minimum pensions for people with short careers are only covered by the safety net.
-* The savings mix is the whole household sector's, which leans toward wealthier savers: a
-  typical family holds even more in the bank. Interest on deposits is not taxed here.
+* The savings mix starts as typical households' (bottom 70% by wealth) and moves toward the
+  whole household sector's as savings grow. Interest on deposits is not taxed here.
+* The top of each generation's wealth distribution is still too low (US: 75th percentile
+  about a year's wages short, couples with degrees nearly two): inheritances, own
+  businesses and returns above the market's are not modelled. Europe's backtest checks
+  medians only (the HFCS tables give no spread by age).
 * Divorce, disability and health shocks are not modelled (use the job-loss scenario for an
   income shock).
 * Not modelled: means-tested health subsidies (CH premium reductions, NL zorgtoeslag),

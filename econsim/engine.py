@@ -68,6 +68,13 @@ WEALTH_MPC = 0.04                 # share of free savings spent per year before 
 #                                   Slacalek 2011: 2-6 cents per dollar of wealth - the
 #                                   backtest cannot tell values apart (few couples hold
 #                                   much above the emergency fund)
+BUDGET_ELASTICITY_HIGH = 0.4     # spending vs income above the survey couple's (below:
+#                                   Plan.budget_elasticity, 1.0); both fitted on the US and
+#                                   euro-area backtests incl. the spread within cohorts
+PORTFOLIO_K = 1.0                 # free savings (years of income) at which a household's
+#                                   mix is halfway from typical households' (bottom 70%) to
+#                                   the whole household sector's (led by the wealthiest)
+WEALTH_MPC_DECLINE = 0.0          # share of savings spent x (1 + savings/income)^-this
 HOUSING_ELASTICITY = 0.75         # rent / home price vs income relative to the survey couple
 HOME_DRIFT = ((999, 0.0),)       # owned home vs the price index, by age: none - a repeat-
 #                                   sales index follows the same houses, so it already
@@ -1102,6 +1109,16 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
     r_debt_now = r_debt
     rows = []
     last_normal_net = 0.0
+    # savings are held as typical households hold them, moving toward the whole household
+    # sector's mix (wealth-weighted: more in shares, less in deposits) as they grow
+    pf_k = plan.portfolio_wealth_k if plan.portfolio_wealth_k is not None else PORTFOLIO_K
+    PF_ = cd.portfolio or {}
+    pf_hi = None
+    if pf_k and plan.equity_share is None and plan.deposit_share is None and \
+            PF_.get("deposit_share_typical") is not None and \
+            PF_.get("deposit_share") is not None and PF_.get("equity_share") is not None:
+        pf_hi = (float(PF_["equity_share"]), float(PF_["deposit_share"]))
+    eq_now, dep_now = eq_share, dep_share
     for t in range(n_years):
         a1, a2 = e1.age + t, e2.age + t
         ages = (a1, a2)
@@ -1109,14 +1126,14 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
         W = GW[t] * Pt[t]
         # glide path: the share in shares falls over the 15 years before retirement to
         # half of it (as target-date funds and most retirees' portfolios)
+        r_inv_t = r_inv + (eq_now - eq_share) * plan.equity_premium / 100
         if plan.glide_path:
             k = min(max((a1 - (ret_age - 15)) / 15, 0.0), 1.0)
-            r_inv_t = r_inv - 0.5 * k * eq_share * plan.equity_premium / 100
+            r_inv_t -= 0.5 * k * eq_now * plan.equity_premium / 100
         else:
             k = 0.0
-            r_inv_t = r_inv
         if HS is not None and t < len(HS.years) and HS.equity[t] == HS.equity[t]:
-            eq_t = eq_share * (1 - 0.5 * k)          # what markets actually returned
+            eq_t = eq_now * (1 - 0.5 * k)            # what markets actually returned
             bond = HS.bond[t] if HS.bond[t] == HS.bond[t] else HS.cash[t]
             r_inv_t = (eq_t * HS.equity[t] + (1 - eq_t) * bond - plan.fund_fees -
                        drag) / 100
@@ -1286,8 +1303,13 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
             # the survey couple's income grows with economy-wide real wages too: spending
             # norms rise with average incomes (saving rates do not trend up as countries
             # grow), so only income RELATIVE to peers moves the budget
-            scale = G * (min(max((y_perm / (ref0 * G)) ** plan.budget_elasticity,
-                                 SCALE_BOUNDS[0]), SCALE_BOUNDS[1])
+            r_perm = y_perm / (ref0 * G)
+            e_hi = plan.budget_elasticity_high if plan.budget_elasticity_high is not None \
+                else BUDGET_ELASTICITY_HIGH
+            if e_hi is None:
+                e_hi = plan.budget_elasticity
+            e_b = plan.budget_elasticity if r_perm <= 1 else e_hi
+            scale = G * (min(max(r_perm ** e_b, SCALE_BOUNDS[0]), SCALE_BOUNDS[1])
                          if y_perm > 0 else SCALE_BOUNDS[0])
             # what the household can afford in housing and cars: its income before
             # housing vs the survey couple's (after housing it would feed back on itself)
@@ -1320,6 +1342,10 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
             free_w = max(cash + invest - tgt_prev, 0.0)
             base_b = sum(exp.values())
             if base_b > 0 and free_w > 0:
+                th = plan.wealth_mpc_decline if plan.wealth_mpc_decline is not None \
+                    else WEALTH_MPC_DECLINE
+                if th and normal_net > 0:   # less of each dollar spent as savings pile up
+                    free_w *= (1 + free_w / normal_net) ** -th
                 f_w = 1 + w_mpc * free_w / base_b
                 exp = {k: v * f_w for k, v in exp.items()}
         # children: OECD-modified equivalence scale (couple 1.5; child <14 +0.3, 14+ +0.5)
@@ -1687,8 +1713,13 @@ def simulate(plan: Plan, cd: CountryData, us: USParams | None = None,
             retire = 0.0
         cash += saving
         free = cash + invest - target
+        if pf_hi is not None:
+            x = max(free, 0.0) / max(net, 1.0)      # free savings in years of income
+            b = x / (x + pf_k)
+            eq_now = eq_share + b * (pf_hi[0] - eq_share)
+            dep_now = dep_share + b * (pf_hi[1] - dep_share)
         if free > 0:
-            cash, invest = target + dep_share * free, (1 - dep_share) * free
+            cash, invest = target + dep_now * free, (1 - dep_now) * free
         else:
             cash, invest = cash + invest, 0.0
         tgt_prev = target

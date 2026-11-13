@@ -435,12 +435,20 @@ with sb.expander("🧾 Other costs & options"):
     church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
                          disabled=iso != "DEU")
     priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
-    elast = st.slider("How much spending follows income", 0.0, 1.5, 0.8, 0.05,
+    elast = st.slider("How much spending follows income (below a typical couple's)",
+                      0.0, 1.5, 1.0, 0.05,
                       help="Living costs = survey couple's budget x (your income after housing"
                            " / theirs, both growing with average wages)^this. 0 = always "
-                           "the survey average; 1 = proportional. The default 0.8 fits best what "
-                           "couples actually accumulated in both backtests (US: SCF "
-                           "households; euro area: HFCS tables).")
+                           "the survey average; 1 = proportional. The defaults (1.0 below a "
+                           "typical couple's income, 0.4 above it) fit best what couples "
+                           "actually accumulated in both backtests (US: SCF households, "
+                           "including the spread within each generation; euro area: HFCS "
+                           "tables).")
+    elast_hi = st.slider("... and above a typical couple's income", 0.0, 1.5, 0.4, 0.05,
+                         help="Richer households save a larger share of each extra dollar "
+                              "(Dynan, Skinner & Zeldes 2004): with one elasticity for all "
+                              "incomes, the top third of earners in the backtest ended up "
+                              "with too little.")
     surv_d = 1.0
     surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, surv_d, 0.05,
                      key=K("surv"),
@@ -638,7 +646,7 @@ def build_plan(iso3: str, override: bool) -> Plan:
         typical_student_debt=bool(sl_typ) and abs(sloan - sl_typ) < 1e-9,
         student_loan_rate=float(sl_rate) if override and abs(sl_rate - slr_d) > 1e-9
         else None, student_loan_years=int(sl_years) if int(sl_years) != 10 else None,
-        budget_elasticity=elast, state=state if iso3 == "USA" else None,
+        budget_elasticity=elast, budget_elasticity_high=elast_hi, state=state if iso3 == "USA" else None,
         survey_correction=surv if abs(surv - surv_d) > 1e-9 else None, child_penalty=work_mode == "Country typical",
         child_dependent_to=int(home_to) if override and int(home_to) != max(home_d, 18)
         else None,

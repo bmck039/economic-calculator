@@ -118,8 +118,9 @@ def test_pension_only_keeps_savings_and_households_hold_deposits(ds):
         inp = down.inputs
         assert 5 < inp["deposit_share"]["value"] < 95, iso
         assert inp["deposit_return"]["value"] < inp["return_nominal"]["value"], iso
-        # (a couple with savings, without the wealth effect that spends them)
-        p = replace(p, wealth_mpc=0.0, starting_savings=200_000.0)
+        # (a couple with savings, without the wealth effect that spends them, and in
+        # typical households' mix throughout - not moving toward the sector's)
+        p = replace(p, wealth_mpc=0.0, starting_savings=200_000.0, portfolio_wealth_k=0.0)
         down = run(ds, p, cd)
         all_in = run(ds, replace(p, deposit_share=0.0,
                                  equity_share=inp["equity_share"]["value"] / 100), cd)

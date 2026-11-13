@@ -47,13 +47,26 @@ def survey_wealth(d: pd.DataFrame) -> pd.Series:
     return wealth(d["fin"], 0.0, d["houses"], d["mrthel"], d["edn_inst"])
 
 
-def _wmed(x, w) -> float:
+def _wq(x, w, q: float) -> float:
     x, w = np.asarray(x, float), np.asarray(w, float)
     if len(x) == 0:
         return float("nan")
     o = np.argsort(x)
     c = np.cumsum(w[o])
-    return float(x[o][np.searchsorted(c, c[-1] / 2)])
+    return float(x[o][min(np.searchsorted(c, c[-1] * q), len(x) - 1)])
+
+
+def _wmed(x, w) -> float:
+    return _wq(x, w, 0.5)
+
+
+def _by_earnings(wealth, wage, w) -> tuple[float, float]:
+    """Median wealth of the bottom and top third by wages (weighted ranks)."""
+    wealth, wage, w = (np.asarray(v, float) for v in (wealth, wage, w))
+    o = np.argsort(wage, kind="stable")
+    c = np.cumsum(w[o]) / w.sum()
+    lo, hi = o[c <= 1 / 3], o[c > 2 / 3]
+    return _wmed(wealth[lo], w[lo]), _wmed(wealth[hi], w[hi])
 
 
 def _kids_share(d: pd.DataFrame, k: int) -> dict:
@@ -218,12 +231,22 @@ class Backtest:
                             "heq_survey": _wmed(sv["houses"] - sv["mrthel"], sv["wgt"]),
                             "own_model": float(np.average(gm["owned"], weights=gm["wgt"])),
                             "own_survey": float(np.average(sv["houses"] > 0,
-                                                           weights=sv["wgt"]))})
+                                                           weights=sv["wgt"])),
+                            "p25_model": _wq(gm["wealth"], gm["wgt"], 0.25),
+                            "p25_survey": _wq(sv["w"], sv["wgt"], 0.25),
+                            "p75_model": _wq(gm["wealth"], gm["wgt"], 0.75),
+                            "p75_survey": _wq(sv["w"], sv["wgt"], 0.75),
+                            **dict(zip(("low_model", "high_model"),
+                                       _by_earnings(gm["wealth"], gm["wage"], gm["wgt"]))),
+                            **dict(zip(("low_survey", "high_survey"),
+                                       _by_earnings(sv["w"], sv["wageinc"], sv["wgt"])))})
         c = pd.DataFrame(out)
         if not c.empty:
             # in years of the cohort's median wages (log errors explode near zero)
             c["wealth_err"] = (c["wealth_model"] - c["wealth_survey"]) / c["income"]
             c["own_err"] = c["own_model"] - c["own_survey"]
+            for k in ("p25", "p75", "low", "high"):
+                c[f"{k}_err"] = (c[f"{k}_model"] - c[f"{k}_survey"]) / c["income"]
         return c
 
 
@@ -258,7 +281,7 @@ def _one(job):
             continue
         x = row.iloc[0]
         out.append({"wave": wave, "year": w, "age0": age0, "group": GROUP[edcl],
-                    "wgt": wgt, "owned": bool(x["owned"]),
+                    "wgt": wgt, "owned": bool(x["owned"]), "wage": x["gross"],
                     "fin": x["liquid"] + x["retirement_account"],
                     "home_eq": x["home_value"] - x["mortgage_balance"],
                     "wealth": wealth(x["liquid"], x["retirement_account"], x["home_value"],
@@ -274,7 +297,14 @@ def score(c: pd.DataFrame) -> dict:
             "wealth_bias": float(np.average(c["wealth_err"], weights=w)),
             "wealth_mae": float(np.average(c["wealth_err"].abs(), weights=w)),
             "own_bias_pp": float(100 * np.average(c["own_err"], weights=w)),
-            "own_mae_pp": float(100 * np.average(c["own_err"].abs(), weights=w))}
+            "own_mae_pp": float(100 * np.average(c["own_err"].abs(), weights=w)),
+            **{f"{k}_bias": float(np.average(c[f"{k}_err"], weights=w))
+               for k in ("p25", "p75", "low", "high") if f"{k}_err" in c},
+            # the spread within cells: 25th and 75th percentiles, bottom and top third
+            # by wages
+            "spread_mae": float(np.mean([np.average(c[f"{k}_err"].abs(), weights=w)
+                                         for k in ("p25", "p75", "low", "high")
+                                         if f"{k}_err" in c] or [np.nan]))}
 
 
 def main():

@@ -193,7 +193,9 @@ USER_AGENT = "econ-dataset-builder/2.0 (+python-requests; personal research)"
 #      2010-2021, compiled from the PDFs: reference/hfcs_tables.csv), eu_history (European
 #      prices, wages, home prices, rents, rates, returns, unemployment), euro-area starting
 #      wealth by age (HFCS), BIS house prices for Greece.
-DATA_VERSION = "11"
+#  12: spending levels refitted with spending that follows income by income level (1.0
+#      below a typical couple's, 0.4 above) and portfolios that grow with savings.
+DATA_VERSION = "12"
 
 # ==========================================================================
 # Comparability notes
