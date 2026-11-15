@@ -8,11 +8,15 @@ and draws charts. Every default shows its source, year and estimate flag; the
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import replace
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from econsim import params as PRM
 from econsim.data import DataStore
@@ -96,9 +100,45 @@ def flag(s) -> str:
 # ======================================================================= sidebar
 sb = st.sidebar
 sb.title("Life plan")
+
+# ---- settings are kept in this browser (localStorage), so the page opens where you left
+# off: every widget has a key ("w:..." / "k:..."), restored once per session
+_store = components.declare_component(
+    "settings_store", path=str(Path(__file__).resolve().parent / "components" /
+                               "settings_store"))
+SETTINGS_NAME = "life-plan-settings-v1"
+PERSIST = ("w:", "k:")
+ss = st.session_state
+if sb.button("↺ Reset all settings", key="_reset",
+             help="Back to the defaults. Your settings are saved in this browser only."):
+    for k_ in [k_ for k_ in ss if isinstance(k_, str) and k_.startswith(PERSIST)]:
+        del ss[k_]
+    ss["_restored"] = True
+    st.rerun()
+if os.environ.get("LIFEPLAN_NO_BROWSER_STORE"):      # headless tests: no browser
+    ss.setdefault("_restored", True)
+if not ss.get("_restored"):
+    raw = _store(mode="load", name=SETTINGS_NAME, key="_settings_load", default=None)
+    if raw is None:                # wait for the browser (it answers at once) rather than
+        st.info("Loading your saved settings…")      # simulate the defaults first
+        if st.button("Start with the defaults", key="_skip_restore"):
+            ss["_restored"] = True
+            st.rerun()
+        st.stop()
+    else:                          # the browser answered ("" = nothing saved yet)
+        try:
+            saved = json.loads(raw) if raw else {}
+        except ValueError:
+            saved = {}
+        for k_, v_ in (saved.items() if isinstance(saved, dict) else ()):
+            if isinstance(k_, str) and k_.startswith(PERSIST):
+                ss[k_] = v_
+        ss["_restored"] = True
+        if saved:
+            st.rerun()
 default_c = "Netherlands" if "Netherlands" in iso_by_name else countries[0][1]
 cname = sb.selectbox("Country", [n for _, n in countries],
-                     index=[n for _, n in countries].index(default_c))
+                     index=[n for _, n in countries].index(default_c), key="w:cname")
 iso = iso_by_name[cname]
 state = None
 if iso == "USA":
@@ -108,24 +148,35 @@ if iso == "USA":
                          if c is None else st_names[c],
                          help="State earnings, rents, home prices, property tax, state income "
                               "tax, price level, health premiums, car insurance and paid "
-                              "family leave.")
+                              "family leave.", key="w:state")
 cd = ds.country(iso, state)
-cmp_names = sb.multiselect("Compare with (up to 3 total)", [n for _, n in countries if n != cname],
-                           default=[n for n in ("United States", "Germany") if n != cname
-                                    and n in iso_by_name][:2], max_selections=2)
-K = lambda name: f"{name}_{iso}_{state}"  # noqa: E731  (per-country keys -> defaults reset)
+# places to compare: every country, and (US) every state - except the one chosen above
+ST_NAMES = PRM.us_state_names()
+PLACES = {n: (i, None) for i, n in countries}
+if "USA" in names:
+    for c_ in sorted(ST_NAMES, key=ST_NAMES.get):
+        PLACES[f"{names['USA']} – {ST_NAMES[c_]}"] = ("USA", c_)
+here = (iso, state)
+cmp_names = sb.multiselect("Compare with (up to 3 total)",
+                           [n for n, pl in PLACES.items() if pl != here],
+                           default=[n for n in ("United States", "Germany")
+                                    if n in PLACES and PLACES[n] != here][:2],
+                           max_selections=2, key="w:cmp_names",
+                           help="Countries, or US states (type a state's name).")
+cmp_names = [n for n in cmp_names if n in PLACES and PLACES[n] != here]
+K = lambda name: f"k:{name}_{iso}_{state}"  # noqa: E731  (per-country keys -> defaults reset)
 
 with sb.expander("👫 Partners & career", expanded=True):
     c1, c2 = st.columns(2)
-    a1 = c1.number_input("Partner 1 age", 18, 70, 23)
-    a2 = c2.number_input("Partner 2 age", 18, 70, 24)
+    a1 = c1.number_input("Partner 1 age", 18, 70, 23, key="w:a1")
+    a2 = c2.number_input("Partner 2 age", 18, 70, 24, key="w:a2")
     pct_opts = [p for p in ("p10", "p25", "median", "p75", "p90") if p in cd.earnings] or ["median"]
     pct_lbl = {"p10": "10th pct", "p25": "25th pct", "median": "Median", "p75": "75th pct",
                "p90": "90th pct"}
     p1 = c1.selectbox("P1 income", pct_opts, index=pct_opts.index("median")
-                      if "median" in pct_opts else 0, format_func=pct_lbl.get)
+                      if "median" in pct_opts else 0, format_func=pct_lbl.get, key="w:p1")
     p2 = c2.selectbox("P2 income", pct_opts, index=pct_opts.index("median")
-                      if "median" in pct_opts else 0, format_func=pct_lbl.get)
+                      if "median" in pct_opts else 0, format_func=pct_lbl.get, key="w:p2")
     edu_opts = [None] + list(EDUCATION)
     edu_help = ("Highest completed education. Sets the unemployment risk (and the Context "
                 "tab's job-market figures) for people of that age and degree, and - if 'Pay "
@@ -133,9 +184,9 @@ with sb.expander("👫 Partners & career", expanded=True):
                 "gap for that degree (OECD Education at a Glance). " + "; ".join(
                     f"{EDU_SHORT[k]} = {v}" for k, v in EDUCATION.items()))
     d1 = c1.selectbox("P1 highest degree", edu_opts, format_func=lambda k: EDU_SHORT[k or "all"],
-                      help=edu_help)
+                      help=edu_help, key="w:d1")
     d2 = c2.selectbox("P2 highest degree", edu_opts, format_func=lambda k: EDU_SHORT[k or "all"],
-                      help=edu_help)
+                      help=edu_help, key="w:d2")
     CAR = cd.career
     job_lbl = {None: "Typical for our age & degree", "FT_grad": "Full time, job needs my degree",
                "FT_nongrad": "Full time, job doesn't need a degree", "PT": "Part time",
@@ -173,21 +224,21 @@ with sb.expander("👫 Partners & career", expanded=True):
              "elsewhere unemployment by age and degree, the part-time share and graduates "
              "in lower-level jobs from the national LFS. Pay grows as your generation's "
              "full-time pay (today's age brackets + the gap that lasts). Off: full-time "
-             "earnings by age.")
+             "earnings by age.", key="w:career_on")
     jm = st.radio("Job market ahead", ["Stays as it is now", "Keeps changing as in the last "
                                        "year (5 more years)"], disabled=not career_on,
                   help="Keeps changing: the change in year-on-year moves between the prior "
-                       "12 months and the last 12 continues for 5 more years, then holds.")
+                       "12 months and the last 12 continues for 5 more years, then holds.", key="w:jm")
     edu_pay = st.checkbox("Pay follows the degree", True, disabled=not (d1 or d2),
                           help="On: earnings = the country's age profile for all workers x "
                                "the full-time pay of that degree relative to all degrees, by "
                                "age (e.g. a bachelor's in the US ~1.3x at 25-34). Off: the "
-                               "all-degree profile (use the income percentile instead).")
+                               "all-degree profile (use the income percentile instead).", key="w:edu_pay")
     g1 = c1.slider("P1 career growth", 0.0, 2.0, 1.0, 0.1, disabled=bool(career_on),
                    help="1.0 = follow the country's age-earnings profile (cross-section of "
                         "today's workers by age). 0 = flat career; 2 = twice as steep. (Not "
-                        "used when careers follow today's job market.)")
-    g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1, disabled=bool(career_on))
+                        "used when careers follow today's job market.)", key="w:g1")
+    g2 = c2.slider("P2 career growth", 0.0, 2.0, 1.0, 0.1, disabled=bool(career_on), key="w:g2")
     ra = cd.retirement_age
     retire_d = int(round(ra.value)) if ra is not None else 67
     retire = st.slider("Retirement age (pay stops, pension starts)", 50, 80, retire_d,
@@ -217,26 +268,26 @@ with sb.expander("👫 Partners & career", expanded=True):
                    f"{cd.earnings_src.note[:160]}")
 
 with sb.expander("💍 Marriage & kids"):
-    married = st.checkbox("Get married", True)
-    m_age = st.number_input("Marriage at P1 age", 18, 80, max(int(a1), 28), disabled=not married)
+    married = st.checkbox("Get married", True, key="w:married")
+    m_age = st.number_input("Marriage at P1 age", 18, 80, max(int(a1), 28), disabled=not married, key=f"w:m_age{a1}")
     wedding = st.number_input(f"Wedding cost ({cd.currency})", 0.0, 1e7,
                               float(round(cd.wedding_cost.value, -2)), 500.0, key=K("wed"),
                               help=src(cd.wedding_cost), disabled=not married)
     kid_opts = ["none"] + list(range(int(a1), 56))
     k1 = st.selectbox("Child 1 born at P1 age", kid_opts,
-                      index=kid_opts.index(max(int(a1), 30)) if max(int(a1), 30) in kid_opts else 0)
+                      index=kid_opts.index(max(int(a1), 30)) if max(int(a1), 30) in kid_opts else 0, key=f"w:k1{a1}")
     k2 = st.selectbox("Child 2 born at P1 age", kid_opts,
-                      index=kid_opts.index(max(int(a1), 33)) if max(int(a1), 33) in kid_opts else 0)
+                      index=kid_opts.index(max(int(a1), 33)) if max(int(a1), 33) in kid_opts else 0, key=f"w:k2{a1}")
     hh = cd.hh or {}
     cc_from = st.slider("Paid childcare from child age", 0, 3, 1,
-                        help="Usually when paid parental leave ends.")
+                        help="Usually when paid parental leave ends.", key="w:cc_from")
     st.caption(f"Full-time paid care until free pre-school at age "
                f"{hh.get('free_childcare_from', 5):g}, then after-school care (20%) to 10; "
                f"school from {hh.get('school_age', 6):g}. Child living costs: OECD-modified "
                "equivalence scale (+20% of the couple budget per child, +33% from 14).")
     cc_to = None
     leave_who = st.radio("Main parental leave taken by", ["Partner 1", "Partner 2"], index=1,
-                         horizontal=True)
+                         horizontal=True, key="w:leave_who")
     lv1 = hh.get('leave1_months', 0) + hh.get('leave2_months', 0)
     fe = cd.family_earn or {}
     pen_lt6 = fe.get(("2", "lt6", "all"))
@@ -247,7 +298,7 @@ with sb.expander("💍 Marriage & kids"):
                               "without children, by the youngest child's age (Eurostat LFS; "
                               "US: CPS microdata; Canada: StatCan), until the youngest is 18. "
                               "Childcare falls with it. Full time: both keep working full "
-                              "time (only parental leave).")
+                              "time (only parental leave).", key="w:work_mode")
     if pen_lt6 is not None:
         st.caption(f"{cd.name}: with 2 children and the youngest under 6, mothers' paid "
                    f"work is {min(pen_lt6, 1.0):.0%} of women without children "
@@ -264,18 +315,18 @@ with sb.expander("💍 Marriage & kids"):
     leave_scale = st.slider("Parental leave vs country typical", 0.0, 2.0, 1.0, 0.1,
                             help=f"Typical: {lv1:.1f} months for the main parent, "
                                  f"{hh.get('partner_leave_months', 0):.1f} for the other "
-                                 "(OECD Family Database; national rules).")
+                                 "(OECD Family Database; national rules).", key="w:leave_scale")
     ccare = st.number_input(f"Childcare per child in care ({cd.currency}/year)", 0.0, 1e7,
                             float(round(cd.childcare_per_child.value)), 100.0, key=K("cc"),
                             help=src(cd.childcare_per_child))
 
 with sb.expander("🏡 Housing"):
-    mode = st.radio("Tenure", ["Buy a home", "Rent forever"], horizontal=True)
+    mode = st.radio("Tenure", ["Buy a home", "Rent forever"], horizontal=True, key="w:mode")
     rent = st.number_input(f"Rent before buying ({cd.currency}/month, excl. utilities)", 0.0,
                            1e6, float(round(cd.rent.value)), 25.0, key=K("rent"),
                            help=src(cd.rent))
     buy_age = st.number_input("Buy at P1 age", 18, 90, max(int(a1), 30),
-                              disabled=mode != "Buy a home")
+                              disabled=mode != "Buy a home", key=f"w:buy_age{a1}")
     HP_ = resolve(Plan(country=iso, earners=(Earner(int(a1), education=d1),
                                              Earner(int(a2), education=d2)),
                        buy_house_age=int(buy_age)), cd)["home_price"]
@@ -325,10 +376,10 @@ with sb.expander("🏡 Housing"):
                         .get("mortgage_rate_future") is not None else " (no data here)")
                      + ". 20-year average: the mean rate on new mortgages since ~2005"
                      + (f": {L['rate_longrun']:g}%." if (L := cd.lend or {}).get("rate_longrun")
-                        else "."))
+                        else "."), key="w:r_out")
     rules = st.checkbox("Use the country's lending rules", True,
-                        help=str(L.get("source", "")) or "No curated rules: 40% of net income.")
-    dsti = st.slider("Max mortgage payment, % of net income", 20, 60, 40, disabled=rules)
+                        help=str(L.get("source", "")) or "No curated rules: 40% of net income.", key="w:rules")
+    dsti = st.slider("Max mortgage payment, % of net income", 20, 60, 40, disabled=rules, key="w:dsti")
     if L:
         st.caption(f"Lending: min. down {L['down_pct']:g}%"
                    + (f" ({L['down_pct_young']:g}% to age {L['young_max_age']:g})"
@@ -343,7 +394,7 @@ with sb.expander("🏡 Housing"):
                                 "fuel, maintenance, tolls; adults without a car get a "
                                 "public-transport pass.")
     budget_scale = st.slider("Lifestyle vs survey average couple", 0.5, 2.0, 1.0, 0.05,
-                             help="Scales the survey budget (food, transport, leisure, ...).")
+                             help="Scales the survey budget (food, transport, leisure, ...).", key="w:budget_scale")
 
 with sb.expander("🚨 Emergencies & job loss"):
     emerg = st.number_input(f"Extra unexpected costs ({cd.currency}/year)", 0.0, 1e7,
@@ -353,13 +404,13 @@ with sb.expander("🚨 Emergencies & job loss"):
     urisk = st.checkbox("Deduct the average cost of unemployment", True,
                         help="Each year: unemployment rate for the partner's age band and "
                              "degree (headline ILO rate: people who lose all pay) x net pay x "
-                             "(1 - benefit replacement). See the Context tab.")
-    efund = st.slider("Emergency fund target (months of spending)", 0.0, 24.0, 6.0, 0.5)
-    jl_on = st.checkbox("Simulate a job loss")
+                             "(1 - benefit replacement). See the Context tab.", key="w:urisk")
+    efund = st.slider("Emergency fund target (months of spending)", 0.0, 24.0, 6.0, 0.5, key="w:efund")
+    jl_on = st.checkbox("Simulate a job loss", key="w:jl_on")
     c1, c2, c3 = st.columns(3)
-    jl_who = c1.selectbox("Who", [1, 2], disabled=not jl_on)
-    jl_age = c2.number_input("At P1 age", 18, 90, int(a1) + 10, disabled=not jl_on)
-    jl_m = c3.number_input("Months", 1, 36, 6, disabled=not jl_on)
+    jl_who = c1.selectbox("Who", [1, 2], disabled=not jl_on, key="w:jl_who")
+    jl_age = c2.number_input("At P1 age", 18, 90, int(a1) + 10, disabled=not jl_on, key=f"w:jl_age{a1}")
+    jl_m = c3.number_input("Months", 1, 36, 6, disabled=not jl_on, key="w:jl_m")
     if cd.nrr:
         st.caption("Net replacement rates (OECD TaxBEN, couple, latest): " + ", ".join(
             f"{m} mo {s.value:.0f}%" for m, s in sorted(cd.nrr.items())))
@@ -433,8 +484,8 @@ with sb.expander("🎓 Student debt"):
 
 with sb.expander("🧾 Other costs & options"):
     church = st.checkbox("Church members (Germany: +8-9% of income tax)", False,
-                         disabled=iso != "DEU")
-    priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL")
+                         disabled=iso != "DEU", key="w:church")
+    priv_h = st.checkbox("Private health insurance (Ireland)", False, disabled=iso != "IRL", key="w:priv_h")
     elast = st.slider("How much spending follows income (below a typical couple's)",
                       0.0, 1.5, 1.0, 0.05,
                       help="Living costs = survey couple's budget x (your income after housing"
@@ -443,12 +494,12 @@ with sb.expander("🧾 Other costs & options"):
                            "typical couple's income, 0.4 above it) fit best what couples "
                            "actually accumulated in both backtests (US: SCF households, "
                            "including the spread within each generation; euro area: HFCS "
-                           "tables).")
+                           "tables).", key="w:elast")
     elast_hi = st.slider("... and above a typical couple's income", 0.0, 1.5, 0.4, 0.05,
                          help="Richer households save a larger share of each extra dollar "
                               "(Dynan, Skinner & Zeldes 2004): with one elasticity for all "
                               "incomes, the top third of earners in the backtest ended up "
-                              "with too little.")
+                              "with too little.", key="w:elast_hi")
     surv_d = 1.0
     surv = st.slider("Add back spending that surveys miss", 0.0, 1.0, surv_d, 0.05,
                      key=K("surv"),
@@ -483,17 +534,17 @@ with sb.expander("👪 Family help & later life"):
                     help=(f"{src(uc)}. " if uc is not None else "No OECD data. ")
                     + "Paid per child for the years below from age 18; living costs while "
                       "at home are already counted (children live at home until the leaving "
-                      "age).")
-    uni_y = st.number_input("University years per child", 1, 8, 4)
+                      "age).", key="w:uni")
+    uni_y = st.number_input("University years per child", 1, 8, 4, key="w:uni_y")
     wpen = st.slider("Main parent's lasting pay penalty after children (%)", 0, 20, 0,
                      help="Hourly pay that never catches up (missed promotions, more family-"
                           "friendly jobs) on top of the hours and employment effect above. In "
                           "Denmark the long-run earnings gap after children is ~20%, about a "
                           "third each from participation, hours and wage rates (Kleven, "
-                          "Landais & Søgaard 2019) - i.e. ~7%.")
+                          "Landais & Søgaard 2019) - i.e. ~7%.", key="w:wpen")
     c1, c2 = st.columns(2)
     ltc_y = c1.number_input("Years of paid long-term care", 0, 15, 0,
-                            help="For one partner, at the end of the plan.")
+                            help="For one partner, at the end of the plan.", key="w:ltc_y")
     ltc_d = 74_400 * cd.lcu_per_usd.value if iso == "USA" else 0.0
     ltc_c = c2.number_input(f"Care cost per year ({cd.currency})", 0.0, 1e7, float(ltc_d),
                             1000.0, key=K("ltc"), disabled=ltc_y == 0,
@@ -508,7 +559,7 @@ with sb.expander("👪 Family help & later life"):
                                "left, as US minimum distributions (which most retirees' "
                                "withdrawals track). Only the pension: savings are left "
                                "untouched (to heirs, or for care) unless the pension can't "
-                               "cover basic costs.") == "Pension + savings"
+                               "cover basic costs.", key="w:spend_down") == "Pension + savings"
 
 with sb.expander("📈 Returns, growth & display"):
     c1, c2 = st.columns(2)
@@ -521,7 +572,7 @@ with sb.expander("📈 Returns, growth & display"):
                          f"rest {eq_hh:.0f}% in shares and funds (OECD financial balance "
                          "sheets; national totals lean toward wealthier households, so a "
                          "typical family holds even more in the bank). Invest everything: no "
-                         "deposits beyond the emergency fund.")
+                         "deposits beyond the emergency fund.", key="w:hold")
     c3, c4 = st.columns(2)
     dep = c3.slider("% kept in bank deposits", 0, 100, int(round(dep_hh)) if hold.startswith(
         "Like") else 0, 5, disabled=hold != "Custom", key=K(f"dep{hold}"))
@@ -567,7 +618,7 @@ with sb.expander("📈 Returns, growth & display"):
                                   " Here: " + ", ".join(
                                       f"{k.replace('_', ' ')} {v[0]:+.1f}%/yr"
                                       for k, v in sorted(pt_.items(), key=lambda x: -x[1][0])
-                                      [:6]) + "." if pt_ else ""))
+                                      [:6]) + "." if pt_ else ""), key="w:costs_out")
     wt = cd.wage_trend
     w_out = st.radio("Wage growth outlook", ["Official projection", "Recent 20-year trend"],
                      index=1 if wt is not None else 0, horizontal=True, disabled=wt is None,
@@ -575,13 +626,13 @@ with sb.expander("📈 Returns, growth & display"):
                           "Ageing Report / OBR / CBO / PBO (expert forecasts that include "
                           "convergence of poorer countries). Trend: the last ~20 years of "
                           "real average-wage growth continue"
-                          + (f" ({wt.value:.2f}%/yr, {wt.year})." if wt is not None else "."))
+                          + (f" ({wt.value:.2f}%/yr, {wt.year})." if wt is not None else "."), key=K("w_out"))
     rwg_src = wt if (w_out != "Official projection" and wt is not None) else \
         cd.real_wage_growth_hist
     rwg_d = float(rwg_src.value) if rwg_src.value == rwg_src.value else 0.5
     rwg = c2.number_input("Real wage growth %/yr (economy-wide)", -3.0, 5.0, round(rwg_d, 2),
                           0.05, key=K(f"rwg{w_out}"), help=src(rwg_src, "{:.2f}"))
-    real = st.toggle("Show in today's money (real)", True)
+    real = st.toggle("Show in today's money (real)", True, key="w:real")
     defl = st.radio("Today's money means", ["cpi", "own"], horizontal=True, key=K("defl"),
                     format_func={"cpi": "Consumer prices (CPI)",
                                  "own": "What our own spending costs"}.get,
@@ -592,12 +643,12 @@ with sb.expander("📈 Returns, growth & display"):
                          "trend - like the UK's Household Costs Indices.")
     cur = st.radio("Currency", ["local", "USD", "intl$"], horizontal=True,
                    format_func={"local": f"Local ({cd.currency})", "USD": "USD",
-                                "intl$": "Intl $ (PPP)"}.get)
+                                "intl$": "Intl $ (PPP)"}.get, key="w:cur")
 
 with sb.expander("🇺🇸 US citizens abroad"):
-    us_cit = st.checkbox("We are US citizens (citizenship-based taxation)", True)
+    us_cit = st.checkbox("We are US citizens (citizenship-based taxation)", True, key="w:us_cit")
     us_emp = st.checkbox("Employed by a US employer / self-employed", False,
-                         help="Adds US FICA where there is no totalization agreement.")
+                         help="Adds US FICA where there is no totalization agreement.", key="w:us_emp")
     st.caption(("✅ US totalization agreement in force — pay social security in one country "
                 "only." if cd.totalization else "⚠️ No US totalization agreement.")
                + " FEIE vs FTC is chosen each year (whichever is cheaper); electing and "
@@ -605,13 +656,14 @@ with sb.expander("🇺🇸 US citizens abroad"):
                "FATCA Form 8938, and PFIC rules for non-US funds (not modelled).")
 
 
-def build_plan(iso3: str, override: bool) -> Plan:
-    """Plan for iso3. `override` = use the sidebar's money inputs (primary country);
-    comparison countries use their own data defaults for local prices."""
+def build_plan(iso3: str, override: bool, st_: str | None = None) -> Plan:
+    """Plan for iso3 (st_: US state). `override` = use the sidebar's money inputs (the
+    place chosen above); comparison places use their own data defaults for local prices."""
+    st_ = state if override else st_
     jl = JobLoss(jl_who - 1, int(jl_age), int(jl_m)) if jl_on else None
+    cc_ = ds.country(iso3, st_ if iso3 == "USA" else None)
     # money amounts entered for the main country move to others at PPP
-    ppp_f = 1.0 if override else \
-        ds.country(iso3).lcu_per_intl.value / cd.lcu_per_intl.value
+    ppp_f = 1.0 if override else cc_.lcu_per_intl.value / cd.lcu_per_intl.value
     p = Plan(
         country=iso3, earners=(
             Earner(int(a1), p1, g1, education=d1, job=j1,
@@ -646,7 +698,7 @@ def build_plan(iso3: str, override: bool) -> Plan:
         typical_student_debt=bool(sl_typ) and abs(sloan - sl_typ) < 1e-9,
         student_loan_rate=float(sl_rate) if override and abs(sl_rate - slr_d) > 1e-9
         else None, student_loan_years=int(sl_years) if int(sl_years) != 10 else None,
-        budget_elasticity=elast, budget_elasticity_high=elast_hi, state=state if iso3 == "USA" else None,
+        budget_elasticity=elast, budget_elasticity_high=elast_hi, state=st_ if iso3 == "USA" else None,
         survey_correction=surv if abs(surv - surv_d) > 1e-9 else None, child_penalty=work_mode == "Country typical",
         child_dependent_to=int(home_to) if override and int(home_to) != max(home_d, 18)
         else None,
@@ -657,11 +709,9 @@ def build_plan(iso3: str, override: bool) -> Plan:
         us_citizens=us_cit,
         us_employer=us_emp, cohort_effects=coh_mode,
         starting_savings=(float(savings0) if abs(savings0 - sav_d) > 1e-9 else None)
-        if override else float(savings0) / cd.lcu_per_intl.value *
-        ds.country(iso3).lcu_per_intl.value,
+        if override else float(savings0) / cd.lcu_per_intl.value * cc_.lcu_per_intl.value,
         starting_retirement=(float(ret0) if abs(ret0 - ret_d0) > 1e-9 else None)
-        if override else float(ret0) / cd.lcu_per_intl.value *
-        ds.country(iso3).lcu_per_intl.value,
+        if override else float(ret0) / cd.lcu_per_intl.value * cc_.lcu_per_intl.value,
         own_home=own if override else False)
     if override and own:
         p = replace(p, home_value_now=float(hv0) if abs(hv0 - hv_d) > 1e-9 else None,
@@ -688,9 +738,9 @@ def build_plan(iso3: str, override: bool) -> Plan:
     return p
 
 
-def country_with_overrides(c):
+def country_with_overrides(c, main=True):
     return replace(c, childcare_per_child=c.childcare_per_child.with_value(ccare)) \
-        if c.iso3 == iso else c
+        if main and c.iso3 == iso else c
 
 
 us = ds.us_params()
@@ -927,13 +977,13 @@ with tabs[3]:
 
 # ---------------------------------------------------------------- compare
 with tabs[4]:
-    sel = [cname] + cmp_names
+    sel = [(cd.name, here)] + [(n, PLACES[n]) for n in cmp_names]
     rows, curves = [], []
-    for n in sel:
-        c_iso = iso_by_name[n]
-        c = ds.country(c_iso, state if c_iso == "USA" else None)
-        p = build_plan(c_iso, c_iso == iso)
-        r = simulate(p, country_with_overrides(c), us)
+    for n, (c_iso, c_st) in sel:
+        main_ = (c_iso, c_st) == here
+        c = ds.country(c_iso, c_st)
+        p = build_plan(c_iso, main_, c_st)
+        r = simulate(p, country_with_overrides(c, main_), us)
         d = to_display(r, c, real, "intl$" if cur == "local" else cur)
         d["country"] = n
         curves.append(d)
@@ -952,7 +1002,7 @@ with tabs[4]:
                      "warnings": len(r.warnings)})
     ccur = "intl $ (PPP)" if cur in ("local", "intl$") else "USD"
     st.caption(f"Same life plan in each country, using each country's own data defaults for "
-               f"wages, prices, taxes and housing (your sidebar overrides apply to {cname} "
+               f"wages, prices, taxes and housing (your sidebar overrides apply to {cd.name} "
                f"only). Shown in {ccur}{', real' if real else ', nominal'} so countries are "
                "comparable.")
     fig = go.Figure()
@@ -977,7 +1027,7 @@ with tabs[4]:
 
 # ---------------------------------------------------------------- context
 with tabs[5]:
-    ctx_iso = [iso_by_name[n] for n in [cname] + cmp_names]
+    ctx_iso = list(dict.fromkeys([iso] + [PLACES[n][0] for n in cmp_names]))
 
     # ---- job market for each partner's age and degree
     st.subheader("Job market for your age and degree")
@@ -1162,3 +1212,16 @@ with tabs[6]:
         st.dataframe(pd.DataFrame(hh_rows), hide_index=True, width="stretch")
     st.download_button("Download simulation (CSV)", disp.to_csv(index=False),
                        f"life_plan_{iso}.csv", "text/csv")
+
+
+# ---- save this run's settings in the browser (after they were restored, so a fresh page
+# never overwrites what was saved before)
+def _plain(v):
+    return v is None or isinstance(v, (bool, int, float, str)) or (
+        isinstance(v, (list, tuple)) and all(_plain(x) for x in v))
+
+
+if ss.get("_restored"):
+    _store(mode="save", name=SETTINGS_NAME, key="_settings_save", default=None,
+           data=json.dumps({k_: v_ for k_, v_ in ss.items() if isinstance(k_, str) and
+                            k_.startswith(PERSIST) and _plain(v_)}, sort_keys=True))

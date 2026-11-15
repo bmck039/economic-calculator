@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0">
+<script>
+// Keeps the planner's settings in this browser's localStorage (nothing leaves the
+// browser). Streamlit component protocol, without the npm library:
+//   load  -> returns the saved JSON text ("" if none) once
+//   save  -> stores args.data (JSON text from Python, so 1.0 stays a float)
+//   clear -> removes it
+let loaded = false;
+function send(type, extra) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra), "*");
+}
+window.addEventListener("message", function (e) {
+  const m = e.data;
+  if (!m || m.type !== "streamlit:render") return;
+  const a = m.args || {};
+  let text = "";
+  try {
+    if (a.mode === "load") text = window.localStorage.getItem(a.name) || "";
+    else if (a.mode === "save") window.localStorage.setItem(a.name, a.data);
+    else if (a.mode === "clear") window.localStorage.removeItem(a.name);
+  } catch (err) { text = ""; }      // storage blocked: behave as if nothing was saved
+  if (a.mode === "load" && !loaded) {
+    loaded = true;
+    send("streamlit:setComponentValue", {value: text, dataType: "json"});
+  }
+});
+send("streamlit:componentReady", {apiVersion: 1});
+send("streamlit:setFrameHeight", {height: 0});
+</script>
+</body>
+</html>

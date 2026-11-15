@@ -111,6 +111,10 @@ failed and fell back to cached or reference values. A complete build stamps
 than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be rebuilt).
 `FRED_SMOKE=1 pytest tests/test_fred.py` checks the live FRED endpoints.
 
+The app remembers your settings in your browser (localStorage; nothing is stored on the
+server), so it opens where you left off; "↺ Reset all settings" in the sidebar goes back to
+the defaults. "Compare with" takes countries and US states.
+
 ## Layout
 
 | Path | What |
@@ -125,6 +129,7 @@ than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be 
 | `econsim/history.py`, `backtest.py`, `backtest_eu.py`, `calibrate.py` | What actually happened (US, Europe); backtests on SCF households and on the HFCS / SCF tables; spending levels fitted to national saving |
 | `reference/hfcs_tables.csv`, `tools/hfcs_tables.py` | The ECB HFCS statistical tables (PDF only), compiled into one table, and the script that does it (`pdftotext`) |
 | `app.py` | Streamlit + Plotly UI (no modelling code) |
+| `components/settings_store/` | A tiny Streamlit component (plain HTML/JS) that keeps the settings in the browser |
 | `tests/` | `test_engine.py` (synthetic country), `test_life.py` (retirement and life factors), `test_params.py` (curated rules), `test_invariants.py` (every country), `test_app.py` (AppTest) |
 
 ### Curated parameters (`econsim/params/`)
@@ -505,7 +510,8 @@ the main parent (Kleven, Landais & Søgaard 2019) and years of paid long-term ca
   buyer is 40): today's prices and rates against young couples' saving - the housing
   squeeze people report. The backtests get ownership right for couples who started from
   their real savings (US) or the survey's (euro area).
-* Labour-market rates are national: US states use the national rates. Pay by degree is a
+* Labour-market rates are national: US states use the national rates (pay follows each
+  state's full-time earnings). Pay by degree is a
   national average gap (field of study, which matters as much, is not modelled).
 * Several rents, home prices, car costs and wedding costs are estimates (quality C); edit
   `econsim/params/*.csv` if you know better values.

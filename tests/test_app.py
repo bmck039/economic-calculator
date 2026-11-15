@@ -114,3 +114,52 @@ def test_app_generations_wealth_and_own_inflation(country):
     _w(at, "number_input", "Partner 1 age").set_value(45).run()
     _w(at, "checkbox", "We already own our home").set_value(True).run()
     assert not at.exception
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+def test_app_compares_us_states():
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.run()
+    at.sidebar.selectbox[0].set_value("United States").run()
+    ms = _w(at, "multiselect", "Compare with")
+    assert "United States – California" in ms.options and "United States" not in ms.options
+    ms.set_value(["United States – California", "United States – Mississippi"]).run()
+    assert not at.exception, at.exception
+    t = next(d.value for d in at.dataframe if "country" in d.value.columns)
+    assert list(t["country"]) == ["United States", "United States – California",
+                                  "United States – Mississippi"]
+    inc = t.set_index("country")["net income /mo"]
+    # state pay, taxes and prices differ (careers follow state earnings too)
+    assert inc["United States – California"] > inc["United States"] > \
+        inc["United States – Mississippi"]
+    # choosing a state as the main place removes it from the comparison
+    _w(at, "selectbox", "US state").set_value("CA").run()
+    assert not at.exception, at.exception
+    assert "United States – California" not in _w(at, "multiselect", "Compare with").value
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+def test_app_restores_saved_settings():
+    """What the browser saved (localStorage) is put back into the widgets."""
+    at = AppTest.from_file(APP, default_timeout=90)
+    for k, v in {"w:cname": "United States", "w:state": "NY", "w:a1": 31, "w:a2": 33,
+                 "w:cmp_names": ["United States – Ohio"], "_restored": True}.items():
+        at.session_state[k] = v
+    at.run()
+    assert not at.exception, at.exception
+    assert any("New York" in t.value for t in at.title)
+    assert _w(at, "number_input", "Partner 1 age").value == 31
+    assert _w(at, "multiselect", "Compare with").value == ["United States – Ohio"]
+    # every setting has a key that can be saved
+    import ast
+    tree = ast.parse(Path(APP).read_text())
+    widgets = {"selectbox", "radio", "multiselect", "slider", "number_input", "checkbox",
+               "toggle", "text_input", "select_slider"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and \
+                n.func.attr in widgets:
+            assert any(k.arg == "key" for k in n.keywords), n.lineno
+    # reset: back to the defaults
+    _w(at, "button", "↺ Reset").click().run()
+    assert not at.exception, at.exception
+    assert _w(at, "number_input", "Partner 1 age").value == 23

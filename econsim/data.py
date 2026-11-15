@@ -665,8 +665,15 @@ class DataStore:
                                   "median full-time earnings vs US), prices x"
                                   f"{price_f:.3f}, property tax {lend['property_tax_pct']:.2f}%"
                                   " of value (ACS)."]
+        # careers (CPS pay by situation and percentile) move with the state's earnings too
+        car = cd.career
+        if car is not None and car.earn:
+            car = replace(car, earn={k: {b_: {q: v * earn_f for q, v in qs.items()}
+                                         for b_, qs in bands.items()}
+                                     for k, bands in car.earn.items()})
         return replace(cd, name=f"{cd.name} – {s['name']}", earnings=earnings, budget=budget,
                        rent=rent, home_price=hp, lend=lend, hh=hh, notes=notes, state=state,
+                       career=car,
                        state_tax=st_tax, state_info=s.to_dict(),
                        childcare_per_child=cc.with_value(cc.value * ccf, note=(
                            f"national x{ccf:.2f} (state price level^1.5: childcare is "
