@@ -163,3 +163,65 @@ def test_app_restores_saved_settings():
     _w(at, "button", "↺ Reset").click().run()
     assert not at.exception, at.exception
     assert _w(at, "number_input", "Partner 1 age").value == 23
+
+
+def _share_code(settings: dict) -> str:
+    """The link format: compact JSON {"v": 1, "s": settings}, zlib, URL-safe base64."""
+    import base64, json, zlib
+    raw = json.dumps({"v": 1, "s": settings}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+def test_app_opens_a_shared_link():
+    """?plan=... loads every setting in it, and the page offers a link for its own."""
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.query_params["plan"] = _share_code({"w:cname": "United States", "w:state": "NY",
+                                           "w:a1": 31, "w:cmp_names": ["Germany"]})
+    at.run()
+    assert not at.exception, at.exception
+    assert any("New York" in t.value for t in at.title)
+    assert _w(at, "number_input", "Partner 1 age").value == 31
+    assert _w(at, "multiselect", "Compare with").value == ["Germany"]
+    assert "plan" not in at.query_params              # later edits are the viewer's own
+    assert any("shared plan" in i.value for i in at.sidebar.info)
+    # the page's own link carries the same settings
+    import base64, json, zlib
+    link = at.code[0].value
+    code = link.split("?plan=")[1]
+    s = json.loads(zlib.decompress(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4))))
+    assert s["v"] == 1 and s["s"]["w:a1"] == 31 and s["s"]["w:state"] == "NY"
+    assert len(link) < 4000                            # comfortably within URL limits
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+def test_app_rejects_a_broken_link():
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.query_params["plan"] = _share_code({"w:a1": 31})[:-12]      # cut short
+    at.run()
+    assert not at.exception, at.exception
+    assert any("could not be read" in w.value for w in at.sidebar.warning)
+    assert _w(at, "number_input", "Partner 1 age").value == 23
+
+
+@pytest.mark.skipif(not HAVE_DATA, reason="run build_econ_dataset.py first")
+def test_compare_tab_charts_wages_prices_and_house_purchases():
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["w:cmp_names"] = ["Germany", "Spain"]
+    at.run()
+    assert not at.exception, at.exception
+    import plotly.io as pio
+    figs = [pio.from_json(e.proto.spec) for e in at.get("plotly_chart")]
+    titles = {f.layout.title.text: f for f in figs if f.layout.title.text}
+    assert "Wages over time (household, before tax)" in titles
+    assert "Consumer prices over time" in titles
+    prices = [t for t in titles["Consumer prices over time"].data if t.name]
+    import base64, numpy as np
+
+    def arr(v):                      # plotly 6 sends arrays as {"dtype", "bdata"}
+        return np.frombuffer(base64.b64decode(v["bdata"]), v["dtype"]) if \
+            isinstance(v, dict) else np.asarray(v)
+    assert len(prices) == 3 and all(abs(arr(t.y)[0] - 100) < 1e-6 for t in prices)
+    houses = [t for t in titles["Net worth over life"].data
+              if t.text is not None and "🏠" in list(t.text)]
+    assert houses, "no house-purchase markers"

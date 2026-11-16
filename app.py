@@ -8,8 +8,10 @@ and draws charts. Every default shows its source, year and estimate flag; the
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import zlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -97,6 +99,38 @@ def flag(s) -> str:
     return " ⚠️" if s.estimated else ""
 
 
+def _plain(v):
+    return v is None or isinstance(v, (bool, int, float, str)) or (
+        isinstance(v, (list, tuple)) and all(_plain(x) for x in v))
+
+
+SHARE_VERSION = 1
+
+
+def encode_share(settings: dict) -> str:
+    """Settings -> URL-safe text: compact JSON, zlib, base64 without padding."""
+    raw = json.dumps({"v": SHARE_VERSION, "s": settings}, separators=(",", ":"),
+                     sort_keys=True).encode()
+    return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
+
+
+def decode_share(text: str) -> dict | None:
+    """Inverse of encode_share; None if the text is not a valid shared plan."""
+    try:
+        z = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+        d = zlib.decompressobj()
+        raw = d.decompress(z, 1_000_000)
+        if d.unconsumed_tail:                     # refuse anything implausibly large
+            return None
+        obj = json.loads(raw)
+    except (ValueError, zlib.error, TypeError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("s"), dict) or \
+            not isinstance(obj.get("v"), int) or obj["v"] > SHARE_VERSION:
+        return None
+    return obj["s"]
+
+
 # ======================================================================= sidebar
 sb = st.sidebar
 sb.title("Life plan")
@@ -109,16 +143,55 @@ _store = components.declare_component(
 SETTINGS_NAME = "life-plan-settings-v1"
 PERSIST = ("w:", "k:")
 ss = st.session_state
+BACKUP_NAME = SETTINGS_NAME + "-before-shared"
+SHARE_PARAM = "plan"
+
+
+def _persisted() -> dict:
+    return {k_: v_ for k_, v_ in ss.items() if isinstance(k_, str) and
+            k_.startswith(PERSIST) and _plain(v_)}
+
+
+def _apply(saved) -> bool:
+    """Replace the persisted widget values with `saved` (a dict from JSON)."""
+    if not isinstance(saved, dict):
+        return False
+    for k_ in [k_ for k_ in ss if isinstance(k_, str) and k_.startswith(PERSIST)]:
+        del ss[k_]
+    for k_, v_ in saved.items():
+        if isinstance(k_, str) and k_.startswith(PERSIST) and _plain(v_):
+            ss[k_] = v_
+    return bool(saved)
+
+
 if sb.button("↺ Reset all settings", key="_reset",
              help="Back to the defaults. Your settings are saved in this browser only."):
     for k_ in [k_ for k_ in ss if isinstance(k_, str) and k_.startswith(PERSIST)]:
         del ss[k_]
-    ss["_restored"] = True
+    ss["_restored"], ss["_shared"] = True, False
     st.rerun()
+
+# ---- a shared link (?plan=...) carries every setting, compressed into the URL itself (no
+# server storage). It wins over this browser's saved settings, which are kept as a backup.
+if SHARE_PARAM in st.query_params and not ss.get("_share_seen"):
+    ss["_share_seen"] = True
+    shared = decode_share(st.query_params[SHARE_PARAM])
+    del st.query_params[SHARE_PARAM]          # later edits are the viewer's own
+    if shared is None:
+        ss["_share_bad"] = True
+    else:
+        _apply(shared)
+        ss["_restored"], ss["_shared"], ss["_backup_pending"] = True, True, True
+        st.rerun()
+if ss.pop("_share_bad", False):
+    sb.warning("That shared link could not be read (it may have been cut short), so this "
+               "page opened with your own settings.")
+
 if os.environ.get("LIFEPLAN_NO_BROWSER_STORE"):      # headless tests: no browser
     ss.setdefault("_restored", True)
 if not ss.get("_restored"):
-    raw = _store(mode="load", name=SETTINGS_NAME, key="_settings_load", default=None)
+    load_name = ss.get("_load_name", SETTINGS_NAME)
+    raw = _store(mode="load", name=load_name, key=f"_settings_load_{load_name}", default=None)
     if raw is None:                # wait for the browser (it answers at once) rather than
         st.info("Loading your saved settings…")      # simulate the defaults first
         if st.button("Start with the defaults", key="_skip_restore"):
@@ -130,12 +203,17 @@ if not ss.get("_restored"):
             saved = json.loads(raw) if raw else {}
         except ValueError:
             saved = {}
-        for k_, v_ in (saved.items() if isinstance(saved, dict) else ()):
-            if isinstance(k_, str) and k_.startswith(PERSIST):
-                ss[k_] = v_
         ss["_restored"] = True
-        if saved:
+        if ss.pop("_load_name", None) is not None or isinstance(saved, dict) and saved:
+            _apply(saved)
             st.rerun()
+share_box = sb.container()           # filled at the end, once every setting is known
+if ss.get("_shared"):
+    sb.info("You opened a shared plan. Changes you make are saved in this browser.")
+    if sb.button("↩ Back to my own settings", key="_unshare",
+                 help="The settings this browser had before you opened the link."):
+        ss["_shared"], ss["_restored"], ss["_load_name"] = False, False, BACKUP_NAME
+        st.rerun()
 default_c = "Netherlands" if "Netherlands" in iso_by_name else countries[0][1]
 cname = sb.selectbox("Country", [n for _, n in countries],
                      index=[n for _, n in countries].index(default_c), key="w:cname")
@@ -986,6 +1064,7 @@ with tabs[4]:
         r = simulate(p, country_with_overrides(c, main_), us)
         d = to_display(r, c, real, "intl$" if cur == "local" else cur)
         d["country"] = n
+        d.attrs["buys"] = [e["age"] for e in r.events if e["event"] == "House purchase"]
         curves.append(d)
         f = d.iloc[0]
         rows.append({"country": n, "net income /mo": f["net_income"] / 12,
@@ -1005,19 +1084,44 @@ with tabs[4]:
                f"wages, prices, taxes and housing (your sidebar overrides apply to {cd.name} "
                f"only). Shown in {ccur}{', real' if real else ', nominal'} so countries are "
                "comparable.")
-    fig = go.Figure()
-    for i, d in enumerate(curves):
-        fig.add_scatter(x=d["age1"], y=d["net_worth"], name=d["country"].iloc[0], mode="lines",
-                        line=dict(color=PALETTE[i], width=2.5),
-                        hovertemplate=d["country"].iloc[0] + ": %{y:,.0f}<extra></extra>")
-    st.plotly_chart(base_layout(fig, "Net worth over life", ccur), width="stretch")
-    fig = go.Figure()
-    for i, d in enumerate(curves):
-        fig.add_scatter(x=d["age1"], y=d["saving"] / 12, name=d["country"].iloc[0],
-                        mode="lines", line=dict(color=PALETTE[i], width=2),
-                        hovertemplate=d["country"].iloc[0] + ": %{y:,.0f}<extra></extra>")
-    st.plotly_chart(base_layout(fig, "Monthly saving", f"per month ({ccur})"),
+
+    def cmp_chart(col, title, ytitle, scale=1.0, mask=None, houses=True):
+        """One line per place; 🏠 marks the year each place's household buys its home."""
+        fig = go.Figure()
+        for i, d in enumerate(curves):
+            nm = d["country"].iloc[0]
+            y = d[col] * scale
+            if mask is not None:
+                y = y.where(mask(d))
+            fig.add_scatter(x=d["age1"], y=y, name=nm, mode="lines", legendgroup=nm,
+                            line=dict(color=PALETTE[i % len(PALETTE)], width=2.5),
+                            hovertemplate=nm + ": %{y:,.0f}<extra></extra>")
+            at = d[d["age1"].isin(d.attrs.get("buys", []))] if houses else d.iloc[:0]
+            if len(at):
+                fig.add_scatter(x=at["age1"], y=at[col] * scale, mode="markers+text",
+                                text=["🏠"] * len(at), textposition="top center",
+                                textfont=dict(size=16), legendgroup=nm, showlegend=False,
+                                marker=dict(color=PALETTE[i % len(PALETTE)], size=10,
+                                            symbol="diamond",
+                                            line=dict(color="white", width=1.5)),
+                                hovertemplate=nm + " buys a home at %{x}<extra></extra>")
+        return base_layout(fig, title, ytitle)
+
+    st.plotly_chart(cmp_chart("net_worth", "Net worth over life", ccur), width="stretch")
+    st.caption("🏠 = the year each household buys its home (none if it keeps renting).")
+    st.plotly_chart(cmp_chart("saving", "Monthly saving", f"per month ({ccur})", 1 / 12),
                     width="stretch")
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(cmp_chart("gross", "Wages over time (household, before tax)",
+                              f"per month ({ccur}{', real' if real else ''})", 1 / 12,
+                              mask=lambda d: d["gross"] > 0), width="stretch")
+    c2.plotly_chart(cmp_chart("price_factor", "Consumer prices over time",
+                              f"index, {int(curves[0]['year'].iloc[0])} = 100", 100,
+                              houses=False), width="stretch")
+    st.caption("Wages: both partners' pay before tax, in years someone works"
+               f"{' - after inflation, so they show buying power' if real else ''}. "
+               "Prices: each place's consumer price index as the model projects it (your "
+               "inflation setting applies to the main place), always nominal.")
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
                  column_config={k: st.column_config.NumberColumn(format="%.0f") for k in
                                 ("net income /mo", "spending /mo", "saving /mo",
@@ -1216,12 +1320,17 @@ with tabs[6]:
 
 # ---- save this run's settings in the browser (after they were restored, so a fresh page
 # never overwrites what was saved before)
-def _plain(v):
-    return v is None or isinstance(v, (bool, int, float, str)) or (
-        isinstance(v, (list, tuple)) and all(_plain(x) for x in v))
-
+with share_box.expander("🔗 Share this plan"):
+    _code = encode_share(_persisted())
+    _base = (st.context.url or "").split("?")[0].split("#")[0]
+    st.caption("Anyone who opens this link sees the same plan: every setting on this page "
+               "is packed into the link itself, so nothing is stored on the server.")
+    st.code(f"{_base}?{SHARE_PARAM}={_code}" if _base else f"?{SHARE_PARAM}={_code}",
+            language=None, wrap_lines=True)
+    st.caption("Copy it with the button at its top right. Changes you make after sharing "
+               "are not in an earlier link.")
 
 if ss.get("_restored"):
     _store(mode="save", name=SETTINGS_NAME, key="_settings_save", default=None,
-           data=json.dumps({k_: v_ for k_, v_ in ss.items() if isinstance(k_, str) and
-                            k_.startswith(PERSIST) and _plain(v_)}, sort_keys=True))
+           data=json.dumps(_persisted(), sort_keys=True),
+           backup=BACKUP_NAME if ss.pop("_backup_pending", False) else "")

@@ -113,7 +113,15 @@ than `DATA_VERSION` in `build_econ_dataset.py` (bump it when old tables must be 
 
 The app remembers your settings in your browser (localStorage; nothing is stored on the
 server), so it opens where you left off; "↺ Reset all settings" in the sidebar goes back to
-the defaults. "Compare with" takes countries and US states.
+the defaults. "Compare with" takes countries and US states; the Compare tab charts net
+worth, saving, wages and consumer prices for each place, with 🏠 at the age each household
+buys its home.
+
+**Sharing a plan:** "🔗 Share this plan" in the sidebar gives a link that carries every
+setting on the page, packed into the link itself (`?plan=` + compressed JSON; about 1 KB,
+nothing stored on the server). Whoever opens it sees the same plan; their own settings are
+kept, and "↩ Back to my own settings" brings them back. A link made by a newer version of
+the app than the one opening it is refused rather than half-applied.
 
 ## Layout
 

@@ -6,9 +6,10 @@
 // Keeps the planner's settings in this browser's localStorage (nothing leaves the
 // browser). Streamlit component protocol, without the npm library:
 //   load  -> returns the saved JSON text ("" if none) once
-//   save  -> stores args.data (JSON text from Python, so 1.0 stays a float)
+//   save  -> stores args.data (JSON text from Python, so 1.0 stays a float); with
+//            args.backup, first copies the previous text there
 //   clear -> removes it
-let loaded = false;
+let loaded = false, backedUp = "";
 function send(type, extra) {
   window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, extra), "*");
 }
@@ -19,7 +20,15 @@ window.addEventListener("message", function (e) {
   let text = "";
   try {
     if (a.mode === "load") text = window.localStorage.getItem(a.name) || "";
-    else if (a.mode === "save") window.localStorage.setItem(a.name, a.data);
+    else if (a.mode === "save") {
+      // first save after opening a shared link: keep what this browser had, so
+      // "Back to my own settings" can bring it back
+      if (a.backup && a.backup !== backedUp) {
+        backedUp = a.backup;
+        window.localStorage.setItem(a.backup, window.localStorage.getItem(a.name) || "");
+      }
+      window.localStorage.setItem(a.name, a.data);
+    }
     else if (a.mode === "clear") window.localStorage.removeItem(a.name);
   } catch (err) { text = ""; }      // storage blocked: behave as if nothing was saved
   if (a.mode === "load" && !loaded) {
