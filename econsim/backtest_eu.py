@@ -34,6 +34,7 @@ households are rebuilt from medians - are checked by running the same method on 
 
     python -m econsim.backtest_eu [--countries DEU ESP ...] [--us] [--out cells.csv]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,19 +47,26 @@ import numpy as np
 import pandas as pd
 
 from .career import RANK_PERSISTENCE
+from .data import DataStore
 from .engine import simulate
 from .history import from_table
 from .model import Earner, Plan
 
-CENTRES = {"16-34": 29.0, "35-44": 39.5, "45-54": 49.5, "55-64": 59.5, "65-74": 69.5,
-           "75+": 80.0}                  # typical age of reference persons in each band
+CENTRES = {
+    "16-34": 29.0,
+    "35-44": 39.5,
+    "45-54": 49.5,
+    "55-64": 59.5,
+    "65-74": 69.5,
+    "75+": 80.0,
+}  # typical age of reference persons in each band
 START_AGES = (30, 40, 50)
-Z = np.array([-1.2816, -0.5244, 0.0, 0.5244, 1.2816])   # deciles 1, 3, 5, 7, 9
-SIGMA = 0.6                               # spread of household income within an age
-OWN_SLOPE = 1.0                           # logit of owning per log income
+Z = np.array([-1.2816, -0.5244, 0.0, 0.5244, 1.2816])  # deciles 1, 3, 5, 7, 9
+SIGMA = 0.6  # spread of household income within an age
+OWN_SLOPE = 1.0  # logit of owning per log income
 SPLIT = 0.6
-MIN_H = 2                                 # years between waves to compare
-BUY_STEPS = (2, 5, 9, 14, 20, 30)         # years ahead when renters may first try to buy
+MIN_H = 2  # years between waves to compare
+BUY_STEPS = (2, 5, 9, 14, 20, 30)  # years ahead when renters may first try to buy
 
 
 def _wmed(x, w) -> float:
@@ -77,13 +85,14 @@ class Tables:
     def __init__(self, t: pd.DataFrame, iso3: str):
         t = t[t["iso3"] == iso3]
         self.iso3 = iso3
-        ref = t[t["table"] == "REF"].pivot_table(index="wave", columns="indicator",
-                                                 values="value")
+        ref = t[t["table"] == "REF"].pivot_table(index="wave", columns="indicator", values="value")
         self.field = ref["fieldwork_mid"].to_dict() if "fieldwork_mid" in ref else {}
         self.inc_year = ref["income_year_mid"].to_dict() if "income_year_mid" in ref else {}
         a = t[(t["group"] == "Age of RP") & t["row"].isin(CENTRES)]
-        self.age = {k: g.assign(c=g["row"].map(CENTRES)).sort_values("c")
-                    for k, g in a.groupby(["table", "wave"])}
+        self.age = {
+            k: g.assign(c=g["row"].map(CENTRES)).sort_values("c")
+            for k, g in a.groupby(["table", "wave"])
+        }
         c4 = t[(t["table"] == "C4") & (t["group"].isin(["Housing status", "Total population"]))]
         self.c4 = {w: g.set_index("row")["value"].to_dict() for w, g in c4.groupby("wave")}
         self.waves = sorted(w for w in self.field if ("A3", w) in self.age)
@@ -105,8 +114,11 @@ class Tables:
         """Financial assets of owners and of renters vs all households (holders)."""
         d = self.c4.get(wave, {})
         al = d.get("All")
-        ow = [d.get(k) for k in ("Owners - outright", "Owners - with mortgage")
-              if d.get(k) == d.get(k) and d.get(k) is not None]
+        ow = [
+            d.get(k)
+            for k in ("Owners - outright", "Owners - with mortgage")
+            if d.get(k) == d.get(k) and d.get(k) is not None
+        ]
         rt = d.get("Renters / other")
         if not al or not ow or rt is None or rt != rt:
             return 1.3, 0.4
@@ -133,7 +145,7 @@ def income_path(T: Tables, w0: int, a0: float, y0: int, years: int) -> np.ndarra
     if len(pts) == 1:
         return np.exp(np.full(years, y[0]))
     out = np.interp(ys, x, y)
-    lo, hi = ys < x[0], ys > x[-1]           # beyond the surveys: the nearest trend
+    lo, hi = ys < x[0], ys > x[-1]  # beyond the surveys: the nearest trend
     out[lo] = y[0] + (ys[lo] - x[0]) * (y[1] - y[0]) / (x[1] - x[0])
     out[hi] = y[-1] + (ys[hi] - x[-1]) * (y[-1] - y[-2]) / (x[-1] - x[-2])
     return np.exp(out)
@@ -173,29 +185,42 @@ def population(T: Tables, w0: int, a0: float) -> Optional[pd.DataFrame]:
         lo, hi = (a, hi) if p.mean() < own else (lo, a)
     rows = []
     for kk, pk in zip(K, p):
-        kinds = [(True, int(round(a0)), pk)] + \
-            [(False, b, (1 - pk) * g) for b, g in buy_plan] + [(False, None, (1 - pk) * never)]
+        kinds = (
+            [(True, int(round(a0)), pk)]
+            + [(False, b, (1 - pk) * g) for b, g in buy_plan]
+            + [(False, None, (1 - pk) * never)]
+        )
         for owner, buy_age, wt in kinds:
             if wt <= 1e-9:
                 continue
-            V = home * kk ** 0.5 if owner else 0.0
-            M = debt * kk ** 0.5 * mort_k if owner else 0.0
+            V = home * kk**0.5 if owner else 0.0
+            M = debt * kk**0.5 * mort_k if owner else 0.0
             F = fin * kk * (r_own if owner else r_rent)
-            rows.append({"k": kk, "own": owner, "buy_age": buy_age, "w": wt / len(K),
-                         "home": V, "mort": min(M, 0.9 * V), "mort_cap": 1.25 * V,
-                         "fin0": F})
+            rows.append(
+                {
+                    "k": kk,
+                    "own": owner,
+                    "buy_age": buy_age,
+                    "w": wt / len(K),
+                    "home": V,
+                    "mort": min(M, 0.9 * V),
+                    "mort_cap": 1.25 * V,
+                    "fin0": F,
+                }
+            )
     d = pd.DataFrame(rows)
 
     def med(s, m=1.0):
         mort = np.minimum(d["mort"] * m, np.maximum(d["mort_cap"], d["mort"]))
         return _wmed(d["fin0"] * s + d["home"] - mort, d["w"])
-    lo, hi = 0.02, 50.0                       # scale financial assets: the median matches
+
+    lo, hi = 0.02, 50.0  # scale financial assets: the median matches
     for _ in range(60):
         s = np.sqrt(lo * hi)
         lo, hi = (s, hi) if med(s) < nw else (lo, s)
     m = 1.0
-    if med(s) > nw * 1.05 + 1000:             # still too rich: owners owe more (up to
-        lo, hi = 1.0, 4.0                     # 125% of the home's value)
+    if med(s) > nw * 1.05 + 1000:  # still too rich: owners owe more (up to
+        lo, hi = 1.0, 4.0  # 125% of the home's value)
         for _ in range(40):
             m = (lo + hi) / 2
             lo, hi = (m, hi) if med(s, m) > nw else (lo, m)
@@ -222,11 +247,25 @@ def cells_for(T: Tables, data_year: int, plan_kw: Optional[dict] = None) -> list
                 continue
             for i, r in enumerate(pop.itertuples(index=False)):
                 pp = path * np.exp(np.log(r.k) * RANK_PERSISTENCE ** np.arange(years))
-                jobs.append({"iso3": T.iso3, "w0": w0, "a0": a0, "y0": y0, "years": years,
-                             "hh": i, "w": r.w, "own": r.own, "buy_age": r.buy_age,
-                             "home": r.home,
-                             "mort": r.mort, "fin": r.fin, "pay": tuple(pp),
-                             "data_year": data_year, "kw": plan_kw or {}})
+                jobs.append(
+                    {
+                        "iso3": T.iso3,
+                        "w0": w0,
+                        "a0": a0,
+                        "y0": y0,
+                        "years": years,
+                        "hh": i,
+                        "w": r.w,
+                        "own": r.own,
+                        "buy_age": r.buy_age,
+                        "home": r.home,
+                        "mort": r.mort,
+                        "fin": r.fin,
+                        "pay": tuple(pp),
+                        "data_year": data_year,
+                        "kw": plan_kw or {},
+                    }
+                )
     return jobs
 
 
@@ -236,12 +275,14 @@ _DS = None
 
 def _init(data_dir):
     global _DS
-    from .data import DataStore
     warnings.simplefilter("ignore")
     _DS = DataStore(data_dir)
     _DS._cd, _DS._H = {}, {}
-    _DS._eu_h = pd.read_csv(Path(data_dir) / "eu_history.csv") \
-        if (Path(data_dir) / "eu_history.csv").exists() else pd.DataFrame()
+    _DS._eu_h = (
+        pd.read_csv(Path(data_dir) / "eu_history.csv")
+        if (Path(data_dir) / "eu_history.csv").exists()
+        else pd.DataFrame()
+    )
     _DS._us_h = pd.read_csv(Path(data_dir) / "us_history.csv")
 
 
@@ -252,42 +293,71 @@ def _one(j):
     cd = _DS._cd[iso]
     key = (iso, j["y0"])
     if key not in _DS._H:
-        _DS._H[key] = from_table(_DS._us_h, j["y0"], cd.data_year) if iso == "USA" else \
-            from_table(_DS._eu_h, j["y0"], cd.data_year, iso3=iso)
+        _DS._H[key] = (
+            from_table(_DS._us_h, j["y0"], cd.data_year)
+            if iso == "USA"
+            else from_table(_DS._eu_h, j["y0"], cd.data_year, iso3=iso)
+        )
     a = int(round(j["a0"]))
     e = [Earner(a, pay_path=tuple(x * s for x in j["pay"])) for s in (SPLIT, 1 - SPLIT)]
-    p = Plan(iso, (e[0], e[1]), start_year=j["y0"], horizon_age=a + j["years"] - 1,
-             marriage_age=a, buy_house_age=a if j["own"] else
-             (None if j["buy_age"] != j["buy_age"] or j["buy_age"] is None
-              else int(j["buy_age"])), own_home=j["own"],
-             home_value_now=j["home"] if j["own"] else None,
-             mortgage_now=j["mort"] if j["own"] else None,
-             starting_savings=j["fin"], starting_retirement=0.0, career_model=False,
-             cohort_effects="off", typical_student_debt=False,
-             **({} if iso == "USA" else {"us_citizens": False}), **j.get("kw", {}))
+    p = Plan(
+        iso,
+        (e[0], e[1]),
+        start_year=j["y0"],
+        horizon_age=a + j["years"] - 1,
+        marriage_age=a,
+        buy_house_age=a
+        if j["own"]
+        else (None if j["buy_age"] != j["buy_age"] or j["buy_age"] is None else int(j["buy_age"])),
+        own_home=j["own"],
+        home_value_now=j["home"] if j["own"] else None,
+        mortgage_now=j["mort"] if j["own"] else None,
+        starting_savings=j["fin"],
+        starting_retirement=0.0,
+        career_model=False,
+        cohort_effects="off",
+        typical_student_debt=False,
+        **({} if iso == "USA" else {"us_citizens": False}),
+        **j.get("kw", {}),
+    )
     try:
-        y = simulate(p, cd, _DS.us_params() if iso == "USA" else None,
-                     history=_DS._H[key]).years
-    except Exception:   # noqa: BLE001 - a failed household is left out
+        y = simulate(p, cd, _DS.us_params() if iso == "USA" else None, history=_DS._H[key]).years
+    except Exception:  # noqa: BLE001 - a failed household is left out
         return []
     # HFCS net wealth leaves out occupational pensions; the SCF's includes retirement
     # accounts: the model's retirement account counts only in the US
     ret = y["retirement_account"] if iso == "USA" else 0.0
-    nw = y["liquid"] + ret + y["home_value"] - y["mortgage_balance"] - \
-        y.get("student_loan_balance", 0.0)
-    return [{"iso3": iso, "w0": j["w0"], "a0": j["a0"], "hh": j["hh"], "w": j["w"],
-             "t": int(t), "nw": float(nw.iloc[t]), "owned": bool(y["owned"].iloc[t])}
-            for t in range(len(y))]
+    nw = (
+        y["liquid"]
+        + ret
+        + y["home_value"]
+        - y["mortgage_balance"]
+        - y.get("student_loan_balance", 0.0)
+    )
+    return [
+        {
+            "iso3": iso,
+            "w0": j["w0"],
+            "a0": j["a0"],
+            "hh": j["hh"],
+            "w": j["w"],
+            "t": int(t),
+            "nw": float(nw.iloc[t]),
+            "owned": bool(y["owned"].iloc[t]),
+        }
+        for t in range(len(y))
+    ]
 
 
-def run(ds, tables: pd.DataFrame, countries, workers: int = 16,
-        **plan_kw) -> tuple[pd.DataFrame, dict]:
+def run(
+    ds, tables: pd.DataFrame, countries, workers: int = 16, **plan_kw
+) -> tuple[pd.DataFrame, dict]:
     Ts = {iso: Tables(tables, iso) for iso in countries}
     jobs = []
     for iso, T in Ts.items():
         try:
             dy = ds.country(iso).data_year
-        except Exception:   # noqa: BLE001 - not a simulated country
+        except Exception:  # noqa: BLE001 - not a simulated country
             continue
         jobs += cells_for(T, dy, plan_kw)
     if workers and workers > 1:
@@ -319,14 +389,23 @@ def compare(sims: pd.DataFrame, Ts: dict) -> pd.DataFrame:
             own_s = T.at("B3", w1, age, log=False) / 100
             if not (nw_s == nw_s and inc_s == inc_s):
                 continue
-            out.append({"iso3": iso, "w0": w0, "w1": w1, "h": round(dt, 1), "a0": a0,
-                        "age": round(age, 1),
-                        "start_model": _wmed(g0["nw"], g0["w"]),
-                        "start_survey": T.at("A3", w0, a0) * 1000,
-                        "wealth_model": _wmed(gm["nw"], gm["w"]), "wealth_survey": nw_s,
-                        "income": inc_s,
-                        "own_model": float(np.average(gm["owned"], weights=gm["w"])),
-                        "own_survey": own_s})
+            out.append(
+                {
+                    "iso3": iso,
+                    "w0": w0,
+                    "w1": w1,
+                    "h": round(dt, 1),
+                    "a0": a0,
+                    "age": round(age, 1),
+                    "start_model": _wmed(g0["nw"], g0["w"]),
+                    "start_survey": T.at("A3", w0, a0) * 1000,
+                    "wealth_model": _wmed(gm["nw"], gm["w"]),
+                    "wealth_survey": nw_s,
+                    "income": inc_s,
+                    "own_model": float(np.average(gm["owned"], weights=gm["w"])),
+                    "own_survey": own_s,
+                }
+            )
     c = pd.DataFrame(out)
     if not c.empty:
         c["wealth_err"] = (c["wealth_model"] - c["wealth_survey"]) / c["income"]
@@ -335,11 +414,14 @@ def compare(sims: pd.DataFrame, Ts: dict) -> pd.DataFrame:
 
 
 def score(c: pd.DataFrame) -> dict:
-    return {"cells": len(c), "countries": int(c["iso3"].nunique()),
-            "wealth_bias": float(c["wealth_err"].mean()),
-            "wealth_mae": float(c["wealth_err"].abs().mean()),
-            "own_bias_pp": float(100 * c["own_err"].mean()),
-            "own_mae_pp": float(100 * c["own_err"].abs().mean())}
+    return {
+        "cells": len(c),
+        "countries": int(c["iso3"].nunique()),
+        "wealth_bias": float(c["wealth_err"].mean()),
+        "wealth_mae": float(c["wealth_err"].abs().mean()),
+        "own_bias_pp": float(100 * c["own_err"].mean()),
+        "own_mae_pp": float(100 * c["own_err"].abs().mean()),
+    }
 
 
 def load_tables(ds, us: bool = False) -> pd.DataFrame:
@@ -350,7 +432,6 @@ def load_tables(ds, us: bool = False) -> pd.DataFrame:
 
 
 def main():
-    from .data import DataStore
     ap = argparse.ArgumentParser()
     ap.add_argument("--countries", nargs="*")
     ap.add_argument("--us", action="store_true", help="the same method on the SCF tables")

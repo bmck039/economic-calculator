@@ -22,6 +22,7 @@ everyone moves roughly as people moving up today's age brackets, except by gaps 
 lasted. Beyond the horizon the history can test, the last estimated phi and the longest
 measurable gap are held.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -32,20 +33,32 @@ import numpy as np
 import pandas as pd
 
 # how each statistic is compared across ages and years
-TRANSFORM = {"earn": "log", "earn_ftyr": "log", "hh_income": "log", "unemp": "logit",
-             "ftyr_share": "logit", "own": "logit", "scf_own": "logit", "networth": "slog",
-             "fin_assets": "slog", "earn_ses": "log"}
-FIT_AGES = (20, 64)          # cohorts used to estimate phi
-GAP_OBS = 3                  # surveys averaged into a cohort's gap
+TRANSFORM = {
+    "earn": "log",
+    "earn_ftyr": "log",
+    "hh_income": "log",
+    "unemp": "logit",
+    "ftyr_share": "logit",
+    "own": "logit",
+    "scf_own": "logit",
+    "networth": "slog",
+    "fin_assets": "slog",
+    "earn_ses": "log",
+}
+FIT_AGES = (20, 64)  # cohorts used to estimate phi
+GAP_OBS = 3  # surveys averaged into a cohort's gap
 PHI_BOUNDS = (0.0, 1.0)
-SLOG_FLOOR = 0.02            # wealth below 2% of the reference counts as 2%
+SLOG_FLOOR = 0.02  # wealth below 2% of the reference counts as 2%
 # education keys of the simulator -> groups in the cohort tables (most specific first)
-EDU_CHAIN = {"bachelor": ("bachelor", "degree", "tertiary", "all"),
-             "master_plus": ("master_plus", "degree", "tertiary", "all"),
-             "short_tertiary": ("short_tertiary", "no_degree", "tertiary", "all"),
-             "upper_secondary": ("upper_secondary", "no_degree", "all"),
-             "below_upper_secondary": ("below_upper_secondary", "no_degree", "all"),
-             None: ("all",), "all": ("all",)}
+EDU_CHAIN = {
+    "bachelor": ("bachelor", "degree", "tertiary", "all"),
+    "master_plus": ("master_plus", "degree", "tertiary", "all"),
+    "short_tertiary": ("short_tertiary", "no_degree", "tertiary", "all"),
+    "upper_secondary": ("upper_secondary", "no_degree", "all"),
+    "below_upper_secondary": ("below_upper_secondary", "no_degree", "all"),
+    None: ("all",),
+    "all": ("all",),
+}
 
 
 def to_rel(v, ref, kind: str):
@@ -81,7 +94,7 @@ def _shift(R: np.ndarray, di: int, dj: int) -> np.ndarray:
     i0, i1 = max(di, 0), min(n + di, n)
     j0, j1 = max(dj, 0), min(m + dj, m)
     if i0 < i1 and j0 < j1:
-        out[i0:i1, j0:j1] = R[i0 - di:i1 - di, j0 - dj:j1 - dj]
+        out[i0:i1, j0:j1] = R[i0 - di : i1 - di, j0 - dj : j1 - dj]
     return out
 
 
@@ -89,25 +102,28 @@ def _shift(R: np.ndarray, di: int, dj: int) -> np.ndarray:
 class Series:
     """One statistic for one group: r(a, y) on a regular grid of single years of age x
     survey years (one survey every `step` years; missing surveys are NaN rows)."""
+
     measure: str
     edu: str
     kind: str
     years: np.ndarray
     ages: np.ndarray
-    R: np.ndarray                # (len(years), len(ages)) relative level
-    level: np.ndarray            # the statistic itself
-    ref: dict                    # year -> all-ages reference
+    R: np.ndarray  # (len(years), len(ages)) relative level
+    level: np.ndarray  # the statistic itself
+    ref: dict  # year -> all-ages reference
     step: int = 1
-    span: int = 1                # ages pooled into one value (window / band width):
+    span: int = 1  # ages pooled into one value (window / band width):
     #                              at horizons below it, gap and outcome share people
     _gaps: dict = field(default_factory=dict, repr=False)
 
     def gaps(self, k: int) -> np.ndarray:
         """gap matrix for a horizon of k surveys (h = k x step years)."""
         if k not in self._gaps:
-            parts = [_shift(self.R, m, m * self.step) - _shift(self.R, m + k, m * self.step)
-                     for m in range(GAP_OBS)]
-            with warnings.catch_warnings():        # all-NaN cells stay NaN
+            parts = [
+                _shift(self.R, m, m * self.step) - _shift(self.R, m + k, m * self.step)
+                for m in range(GAP_OBS)
+            ]
+            with warnings.catch_warnings():  # all-NaN cells stay NaN
                 warnings.simplefilter("ignore", RuntimeWarning)
                 self._gaps[k] = np.nanmean(np.stack(parts), axis=0)
         return self._gaps[k]
@@ -145,9 +161,9 @@ class Fit:
     phi: float
     se: float
     n: int
-    rmse_cohort: float      # in-sample check of the forecast...
-    rmse_cross: float       # ...vs simply today's older bracket (phi = 0)
-    rmse_full: float        # ...vs gaps lasting in full (phi = 1)
+    rmse_cohort: float  # in-sample check of the forecast...
+    rmse_cross: float  # ...vs simply today's older bracket (phi = 0)
+    rmse_full: float  # ...vs gaps lasting in full (phi = 1)
 
 
 def fit_phi(series: list[Series], h: int) -> Optional[Fit]:
@@ -170,24 +186,35 @@ def fit_phi(series: list[Series], h: int) -> Optional[Fit]:
         return None
     phi = float((x * t).sum() / (x * x).sum())
     res = t - phi * x
-    se = float(np.sqrt((res ** 2).sum() / max(len(x) - 1, 1) / (x * x).sum()))
+    se = float(np.sqrt((res**2).sum() / max(len(x) - 1, 1) / (x * x).sum()))
     phi_c = float(np.clip(phi, *PHI_BOUNDS))
-    return Fit(phi_c, se, len(x), float(np.sqrt(np.mean((t - phi_c * x) ** 2))),
-               float(np.sqrt(np.mean(t ** 2))), float(np.sqrt(np.mean((t - x) ** 2))))
+    return Fit(
+        phi_c,
+        se,
+        len(x),
+        float(np.sqrt(np.mean((t - phi_c * x) ** 2))),
+        float(np.sqrt(np.mean(t**2))),
+        float(np.sqrt(np.mean((t - x) ** 2))),
+    )
 
 
 @dataclass
 class CohortData:
     """All cohort series for one country, with phi pooled as the data allow."""
-    series: dict = field(default_factory=dict)     # (measure, edu) -> Series
-    fits: dict = field(default_factory=dict)       # measure -> {h: Fit}
-    source: dict = field(default_factory=dict)     # measure -> text
-    borrowed: dict = field(default_factory=dict)   # measure -> where its phi comes from
+
+    series: dict = field(default_factory=dict)  # (measure, edu) -> Series
+    fits: dict = field(default_factory=dict)  # measure -> {h: Fit}
+    source: dict = field(default_factory=dict)  # measure -> text
+    borrowed: dict = field(default_factory=dict)  # measure -> where its phi comes from
 
     @classmethod
-    def from_table(cls, t: pd.DataFrame, fits: Optional[dict] = None,
-                   max_year: Optional[int] = None,
-                   borrow: Optional[dict] = None) -> Optional["CohortData"]:
+    def from_table(
+        cls,
+        t: pd.DataFrame,
+        fits: Optional[dict] = None,
+        max_year: Optional[int] = None,
+        borrow: Optional[dict] = None,
+    ) -> Optional["CohortData"]:
         """t: rows measure, education, age, year, value, ref, span, source for one
         country. fits: {measure: {h: Fit}} estimated elsewhere (pooled), else on t.
         borrow: measure -> (label, {h: Fit}) for statistics whose surveys cannot measure
@@ -253,8 +280,9 @@ class CohortData:
         g_lo = 0.0 if lo == 0 else s.gap(a0, y, lo)
         return g_lo + (s.gap(a0, y, hi) - g_lo) * (h - lo) / (hi - lo)
 
-    def adjustment(self, measure: str, edu: Optional[str], a0: int, h: int,
-                   mode: str = "history") -> float:
+    def adjustment(
+        self, measure: str, edu: Optional[str], a0: int, h: int, mode: str = "history"
+    ) -> float:
         """phi_h x gap_h: how far the cohort now aged a0 will be from today's people
         aged a0 + h, when it gets there (relative units of the statistic).
         mode "full": the whole gap lasts (phi = 1); "off": none of it."""
@@ -265,17 +293,21 @@ class CohortData:
             return 0.0
         return g if mode == "full" else self.phi(measure, h) * g
 
-    def path(self, measure: str, edu: Optional[str], a0: int, years: int,
-             mode: str = "history") -> Optional[np.ndarray]:
+    def path(
+        self, measure: str, edu: Optional[str], a0: int, years: int, mode: str = "history"
+    ) -> Optional[np.ndarray]:
         """The statistic relative to the all-ages reference for h = 0..years-1: today's
         level at a0 + h plus the lasting gap. NaN beyond the surveyed ages."""
         s = self.get(measure, edu)
         if s is None:
             return None
         y = int(s.years[-1])
-        return np.array([_interp_age(s, a0 + h, y) +
-                         self.adjustment(measure, edu, a0, h, mode)
-                         for h in range(years)])
+        return np.array(
+            [
+                _interp_age(s, a0 + h, y) + self.adjustment(measure, edu, a0, h, mode)
+                for h in range(years)
+            ]
+        )
 
     def level(self, measure: str, edu: Optional[str], a: float) -> float:
         """The statistic itself at age a in the latest survey."""
@@ -348,6 +380,5 @@ def build_series(t: pd.DataFrame, max_year: Optional[int] = None) -> dict:
             L[i, inside] = np.interp(ages[inside], a_, gy["value"].to_numpy(float)[ok])
             ref[int(y)] = float(gy["ref"].iloc[0])
         span = int(g["span"].iloc[0]) if "span" in g and g["span"].notna().any() else 1
-        out[tuple(k) if multi else (m, e)] = Series(m, e, kind, years, ages, R, L, ref,
-                                                   step, span)
+        out[tuple(k) if multi else (m, e)] = Series(m, e, kind, years, ages, R, L, ref, step, span)
     return out

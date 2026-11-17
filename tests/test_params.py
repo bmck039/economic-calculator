@@ -1,35 +1,88 @@
 """Curated parameters (econsim/params) and the modules that use them."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-
-from econsim import params as P
-from econsim.engine import annuity_pv, leave_schedule, pension_contribution, simulate
-from econsim.model import Earner, Plan
-from econsim.tax import (household_income_tax, uk_sdlt_first_time, us_resident_tax,
-                         youth_tax_factor)
-
 from test_engine import US, country, plan  # synthetic country & plan helpers
 
-ALL = ["AUT", "BEL", "BGR", "HRV", "CYP", "CZE", "DNK", "EST", "FIN", "FRA", "DEU", "GRC",
-       "HUN", "ISL", "IRL", "ITA", "LVA", "LTU", "LUX", "MLT", "NLD", "NOR", "POL", "PRT",
-       "ROU", "SVK", "SVN", "ESP", "SWE", "CHE", "LIE", "GBR", "CAN", "USA"]
+from econsim import params as P
+from econsim.engine import simulate
+from econsim.household import leave_schedule, pension_contribution
+from econsim.model import Earner, Plan
+from econsim.money import annuity_pv
+from econsim.tax import household_income_tax, uk_sdlt_first_time, us_resident_tax, youth_tax_factor
+
+ALL = [
+    "AUT",
+    "BEL",
+    "BGR",
+    "HRV",
+    "CYP",
+    "CZE",
+    "DNK",
+    "EST",
+    "FIN",
+    "FRA",
+    "DEU",
+    "GRC",
+    "HUN",
+    "ISL",
+    "IRL",
+    "ITA",
+    "LVA",
+    "LTU",
+    "LUX",
+    "MLT",
+    "NLD",
+    "NOR",
+    "POL",
+    "PRT",
+    "ROU",
+    "SVK",
+    "SVN",
+    "ESP",
+    "SWE",
+    "CHE",
+    "LIE",
+    "GBR",
+    "CAN",
+    "USA",
+]
 DATA = (Path(__file__).resolve().parent.parent / "econ_data" / "earnings_profile.csv").exists()
 
 
 def test_every_country_has_complete_curated_rows():
     for iso in ALL:
         assert P.housing_item(iso, "rent_new_lease") is not None, iso
-        assert (P.housing_item(iso, "home_price") or P.housing_item(iso, "home_price_m2")), iso
+        assert P.housing_item(iso, "home_price") or P.housing_item(iso, "home_price_m2"), iso
         L, H = P.lending(iso), P.household(iso)
-        for k in ("down_pct", "term", "transfer_pct", "closing_pct", "rate_longrun",
-                  "fixation_years", "property_tax_pct"):
+        for k in (
+            "down_pct",
+            "term",
+            "transfer_pct",
+            "closing_pct",
+            "rate_longrun",
+            "fixation_years",
+            "property_tax_pct",
+        ):
             assert L[k] == L[k], (iso, k)
-        for k in ("cars", "car_price", "car_insurance", "fuel_price", "km_year", "leave1_months",
-                  "school_age", "pension_nrr", "invest_tax_drag", "wedding_cost",
-                  "real_wage_growth", "transit_pass", "free_childcare_from"):
+        for k in (
+            "cars",
+            "car_price",
+            "car_insurance",
+            "fuel_price",
+            "km_year",
+            "leave1_months",
+            "school_age",
+            "pension_nrr",
+            "invest_tax_drag",
+            "wedding_cost",
+            "real_wage_growth",
+            "transit_pass",
+            "free_childcare_from",
+        ):
             assert H[k] == H[k], (iso, k)
     srcs = P._hh_sources()
     for k in P.household("DEU"):
@@ -48,15 +101,16 @@ def test_state_income_tax_examples():
     tx = us_resident_tax([60000, 55000], True, 0, 0, p, P.us_state_tax().loc["TX"].to_dict())
     ca = us_resident_tax([60000, 55000], True, 0, 0, p, P.us_state_tax().loc["CA"].to_dict())
     assert tx.state == 0 and 2500 < ca.state < 3500
-    assert tx.federal == pytest.approx(9440)                 # (115000-32200) MFJ brackets
+    assert tx.federal == pytest.approx(9440)  # (115000-32200) MFJ brackets
     assert ca.state_payroll == pytest.approx(0.013 * 115000)  # CA SDI
 
 
 def test_itemising_mortgage_interest_lowers_us_tax():
     st = P.us_state_tax().loc["NJ"].to_dict()
     a = us_resident_tax([90000, 80000], True, 0, 0, US, st)
-    b = us_resident_tax([90000, 80000], True, 0, 0, US, st, mortgage_interest=25000,
-                        property_tax=9000)
+    b = us_resident_tax(
+        [90000, 80000], True, 0, 0, US, st, mortgage_interest=25000, property_tax=9000
+    )
     assert b.federal < a.federal
 
 
@@ -97,7 +151,7 @@ def test_leave_schedule_primary_and_partner():
     s = leave_schedule(10, [2, None], hh, p)
     on1 = sum(x is not None for x in s[1])
     on0 = sum(x is not None for x in s[0])
-    assert on1 == 12 and on0 == 2                        # 2 + 10 months; father 2.5 -> 2
+    assert on1 == 12 and on0 == 2  # 2 + 10 months; father 2.5 -> 2
 
 
 def test_parental_leave_cuts_income_in_birth_years():
@@ -120,7 +174,8 @@ def test_lti_limit_binds_in_ireland_like_rules():
 
 
 def test_annuity_pv_inverts_payment():
-    from econsim.engine import annuity
+    from econsim.money import annuity
+
     pay = annuity(300_000, 0.04, 25)
     assert annuity_pv(pay, 0.04, 25) == pytest.approx(300_000)
 
@@ -128,24 +183,33 @@ def test_annuity_pv_inverts_payment():
 @pytest.mark.skipif(not DATA, reason="run build_econ_dataset.py first")
 def test_all_countries_and_some_states_simulate_sanely():
     from econsim.data import DataStore
+
     ds = DataStore()
     us = ds.us_params()
     for iso, st in [(c, None) for c, _ in ds.countries()] + [("USA", "CA"), ("USA", "TX")]:
         cd = ds.country(iso, st)
-        p = Plan(country=iso, earners=(Earner(23), Earner(24)), marriage_age=28,
-                 child_ages=(30, 33), buy_house_age=30, horizon_age=66, us_citizens=False,
-                 state=st)
+        p = Plan(
+            country=iso,
+            earners=(Earner(23), Earner(24)),
+            marriage_age=28,
+            child_ages=(30, 33),
+            buy_house_age=30,
+            horizon_age=66,
+            us_citizens=False,
+            state=st,
+        )
         d = simulate(p, cd, us).years
         assert d["net_income"].iloc[0] > 0, iso
         ratio = d["expenses_recurring"].iloc[0] / d["net_income"].iloc[0]
-        assert 0.4 < ratio < 1.3, (iso, st, ratio)          # spending vs income at 23
-        assert d.filter(like="budget:vehicle").sum().sum() == 0, iso   # car module replaces
+        assert 0.4 < ratio < 1.3, (iso, st, ratio)  # spending vs income at 23
+        assert d.filter(like="budget:vehicle").sum().sum() == 0, iso  # car module replaces
         assert 0.4 <= d["budget_scale"].iloc[0] <= 2.0
 
 
 @pytest.mark.skipif(not DATA, reason="run build_econ_dataset.py first")
 def test_state_changes_prices_and_taxes():
     from econsim.data import DataStore
+
     ds = DataStore()
     ca, ms = ds.country("USA", "CA"), ds.country("USA", "MS")
     assert ca.home_price.value > 2 * ms.home_price.value

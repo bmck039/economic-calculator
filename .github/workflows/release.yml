@@ -1,11 +1,15 @@
-# Tests every push. When a stable release is published, also moves the `release` branch to
-# it; doco-cd on the server follows that branch (see README, "Deploying").
+# Tests every push (without the built data: the UI and backtest tests are skipped). When a
+# stable release is published, the FULL suite runs on the built data first - and only if it
+# passes does the `release` branch move to the release; doco-cd on the server follows that
+# branch (see README, "Deploying"). A failed run never reaches the server, and GitHub emails
+# you about it (Settings -> Notifications -> Actions).
 name: test and release
 on:
   push:
     branches: [main]
   release:
     types: [published]
+  workflow_dispatch:          # run the full suite by hand (Actions tab -> Run workflow)
 
 jobs:
   test:
@@ -16,13 +20,63 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Lint (undefined or unused names, imports, line length)
+        run: ruff check .
+      - name: Formatting
+        run: ruff format --check .
+      - run: python -m pytest -q -p no:cacheprovider tests
+
+  full:
+    # the whole suite on the built data: before a release is deployed, or by hand
+    needs: test
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
       - run: pip install -r requirements.txt
-      # The UI smoke tests need the built data and are skipped here; the container runs
-      # the full suite on its first start with the new version.
+      - name: Data version
+        id: data
+        run: echo "version=$(sed -n 's/^DATA_VERSION = "\(.*\)"/\1/p' econdata/version.py)" >> "$GITHUB_OUTPUT"
+      # the built tables are kept between runs for each data version (as the server keeps
+      # them until the version changes); the download cache is not kept (~1 GB)
+      - name: Restore the built data
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            econ_data
+            !econ_data/.cache
+            !econ_data/golden
+            !econ_data/golden_app
+          key: econ-data-v${{ steps.data.outputs.version }}
+      - name: Build the data (~10-20 min; only for a new data version)
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
+        # exit 2 = some sources fell back to cached or reference values: still usable
+        run: |
+          python build_econ_dataset.py --out econ_data || [ $? -eq 2 ]
+          rm -rf econ_data/.cache
+      - name: Keep the built data (even if a test fails below)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            econ_data
+            !econ_data/.cache
+            !econ_data/golden
+            !econ_data/golden_app
+          key: econ-data-v${{ steps.data.outputs.version }}
       - run: python -m pytest -q -p no:cacheprovider tests
 
   deploy:
-    needs: test
+    needs: [test, full]
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     permissions:

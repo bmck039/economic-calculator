@@ -1,0 +1,9 @@
+# Development only (not needed to run the app): linting, formatting, finding unused and
+# duplicated code.
+#   .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/ruff check . && .venv/bin/ruff format --check .      (rules in pyproject.toml)
+#   .venv/bin/vulture app.py ui econsim econdata run.py tools --min-confidence 80
+#   .venv/bin/pylint --disable=all --enable=duplicate-code econsim econdata ui tools
+ruff==0.17.5
+vulture==2.16
+pylint==4.1.4

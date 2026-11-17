@@ -18,15 +18,18 @@ Local social security is not creditable; with a totalization agreement it replac
 US Social Security. A local employer does not withhold US FICA; a US employer in a
 country without an agreement does (option `us_employer`).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from .model import TaxPoint
+from .params import parse_rate_brackets
 
 
-def local_rates(gross: float, aw: float, points: list[TaxPoint],
-                marginal_top: float | None) -> tuple[float, float]:
+def local_rates(
+    gross: float, aw: float, points: list[TaxPoint], marginal_top: float | None
+) -> tuple[float, float]:
     """(income tax, employee SSC) in currency for one earner's annual gross."""
     if gross <= 0 or not points:
         return 0.0, 0.0
@@ -62,7 +65,7 @@ def local_rates(gross: float, aw: float, points: list[TaxPoint],
 # ---------------------------------------------------------------- US federal
 @dataclass
 class USParams:
-    brackets_mfj: list[tuple[float, float]]     # (rate, lower threshold)
+    brackets_mfj: list[tuple[float, float]]  # (rate, lower threshold)
     brackets_single: list[tuple[float, float]]
     std_mfj: float
     std_single: float
@@ -73,23 +76,36 @@ class USParams:
     housing_limit: float
     fica_rate: float
     ss_wage_base: float
-    eitc_scale: float = 1.0          # EITC dollar amounts vs 2026 (indexed like the rest)
+    eitc_scale: float = 1.0  # EITC dollar amounts vs 2026 (indexed like the rest)
 
     def indexed(self, f: float) -> "USParams":
         """All dollar amounts scaled by an inflation factor f (IRS indexes yearly)."""
-        return USParams([(r, t * f) for r, t in self.brackets_mfj],
-                        [(r, t * f) for r, t in self.brackets_single],
-                        self.std_mfj * f, self.std_single * f, self.ctc, self.ctc_refundable,
-                        self.feie * f, self.housing_base * f, self.housing_limit * f,
-                        self.fica_rate, self.ss_wage_base * f, self.eitc_scale * f)
+        return USParams(
+            [(r, t * f) for r, t in self.brackets_mfj],
+            [(r, t * f) for r, t in self.brackets_single],
+            self.std_mfj * f,
+            self.std_single * f,
+            self.ctc,
+            self.ctc_refundable,
+            self.feie * f,
+            self.housing_base * f,
+            self.housing_limit * f,
+            self.fica_rate,
+            self.ss_wage_base * f,
+            self.eitc_scale * f,
+        )
 
 
 # Earned income tax credit, tax year 2026 (IRS Rev. Proc. 2025-32 s.4.06; rates: IRC s.32):
 # children 0 / 1 / 2 / 3+ -> phase-in rate, maximum credit, phase-out rate; the phase-out
 # starts at 18,140 (no children) / 31,160 (children) for joint filers, 7,280 less for
 # others (the completed phase-outs 26,820 / 58,863 / 65,899 / 70,244 follow)
-EITC = ((0.0765, 664.0, 0.0765), (0.34, 4427.0, 0.1598), (0.40, 7316.0, 0.2106),
-        (0.45, 8231.0, 0.2106))
+EITC = (
+    (0.0765, 664.0, 0.0765),
+    (0.34, 4427.0, 0.1598),
+    (0.40, 7316.0, 0.2106),
+    (0.45, 8231.0, 0.2106),
+)
 EITC_START_MFJ = (18_140.0, 31_160.0)
 EITC_MFJ_EXTRA = 7_280.0
 
@@ -123,22 +139,31 @@ def bracket_tax(taxable: float, brackets: list[tuple[float, float]]) -> float:
 
 @dataclass
 class USResult:
-    residual: float          # USD owed to the IRS after credits (negative = refund)
-    method: str              # "FEIE+FTC" or "FTC"
+    residual: float  # USD owed to the IRS after credits (negative = refund)
+    method: str  # "FEIE+FTC" or "FTC"
     feie_residual: float
     ftc_residual: float
     us_tax_before_credits: float
 
 
-def us_expat_tax(earned: list[float], foreign_income_tax: list[float], married: bool,
-                 n_children: int, housing_cost: float, p: USParams) -> USResult:
+def us_expat_tax(
+    earned: list[float],
+    foreign_income_tax: list[float],
+    married: bool,
+    n_children: int,
+    housing_cost: float,
+    p: USParams,
+) -> USResult:
     """All amounts in USD for one year. `earned`/`foreign_income_tax` per spouse."""
     earned = [max(e, 0.0) for e in earned]
     total = sum(earned)
     if total <= 0:
         return USResult(0.0, "none", 0.0, 0.0, 0.0)
-    units = [(earned, foreign_income_tax)] if married else \
-        [([e], [t]) for e, t in zip(earned, foreign_income_tax)]
+    units = (
+        [(earned, foreign_income_tax)]
+        if married
+        else [([e], [t]) for e, t in zip(earned, foreign_income_tax)]
+    )
     feie_tot = ftc_tot = before_tot = 0.0
     for k, (inc, ft) in enumerate(units):
         brackets = p.brackets_mfj if married else p.brackets_single
@@ -157,8 +182,7 @@ def us_expat_tax(earned: list[float], foreign_income_tax: list[float], married: 
         ftc_b = min(sum(ft), t_all)
         t_b = t_all - ftc_b
         credit_nonref = min(ctc, t_b)
-        refundable = min(p.ctc_refundable * kids, ctc - credit_nonref,
-                         max(0.15 * (agi - 2500), 0))
+        refundable = min(p.ctc_refundable * kids, ctc - credit_nonref, max(0.15 * (agi - 2500), 0))
         res_b = t_b - credit_nonref - refundable
         # ---- A) FEIE (+ housing exclusion on the first earner) + FTC on the rest
         excl = [min(e, p.feie) for e in inc]
@@ -169,12 +193,15 @@ def us_expat_tax(earned: list[float], foreign_income_tax: list[float], married: 
         excluded = sum(excl) + housing
         taxable_rest = max(agi - excluded - std, 0)
         # stacking rule: rates as if the excluded income were still there
-        t_a = bracket_tax(taxable_rest + excluded, brackets) - bracket_tax(excluded, brackets) \
-            if taxable_rest > 0 else 0.0
+        t_a = (
+            bracket_tax(taxable_rest + excluded, brackets) - bracket_tax(excluded, brackets)
+            if taxable_rest > 0
+            else 0.0
+        )
         share_taxed = (agi - excluded) / agi if agi else 0
         ftc_a = min(sum(ft) * share_taxed, t_a)
         t_a -= ftc_a
-        res_a = t_a - min(ctc, t_a)   # no refundable ACTC when claiming the FEIE
+        res_a = t_a - min(ctc, t_a)  # no refundable ACTC when claiming the FEIE
         feie_tot += res_a
         ftc_tot += res_b
     if feie_tot <= ftc_tot:
@@ -192,17 +219,24 @@ def us_fica(earned_usd: float, p: USParams) -> float:
 # income (Germany Ehegattensplitting, Luxembourg class 2, Portugal/Poland joint
 # filing). Applied to the income-tax part of the OECD single-person curve.
 SPLITTING = {"DEU", "LUX", "PRT", "POL"}
-FRA_HALF_PART_CAP = 1807.0   # quotient familial: max advantage per child half-part (2026)
+FRA_HALF_PART_CAP = 1807.0  # quotient familial: max advantage per child half-part (2026)
 
 
-def income_tax_only(gross: float, aw: float, points: list[TaxPoint],
-                    marginal_top: float | None) -> float:
+def income_tax_only(
+    gross: float, aw: float, points: list[TaxPoint], marginal_top: float | None
+) -> float:
     return local_rates(gross, aw, points, marginal_top)[0]
 
 
-def household_income_tax(iso3: str, gross: list[float], married: bool, n_children: int,
-                         aw: float, points: list[TaxPoint],
-                         marginal_top: float | None) -> list[float]:
+def household_income_tax(
+    iso3: str,
+    gross: list[float],
+    married: bool,
+    n_children: int,
+    aw: float,
+    points: list[TaxPoint],
+    marginal_top: float | None,
+) -> list[float]:
     """Income tax per earner, after joint-taxation rules (split back pro rata)."""
     indiv = [income_tax_only(g, aw, points, marginal_top) for g in gross]
     tot = sum(gross)
@@ -225,8 +259,13 @@ def uk_sdlt_first_time(price: float) -> float:
     """England stamp duty land tax for a first-time buyer (from April 2025)."""
     if price <= 500_000:
         return 0.05 * max(price - 300_000, 0)
-    bands = [(125_000, 0.0), (250_000, 0.02), (925_000, 0.05), (1_500_000, 0.10),
-             (float("inf"), 0.12)]
+    bands = [
+        (125_000, 0.0),
+        (250_000, 0.02),
+        (925_000, 0.05),
+        (1_500_000, 0.10),
+        (float("inf"), 0.12),
+    ]
     tax, lo = 0.0, 0.0
     for hi, r in bands:
         if price > lo:
@@ -236,7 +275,7 @@ def uk_sdlt_first_time(price: float) -> float:
 
 
 # ---------------------------------------------------------------- US residents
-SALT_CAP = 40_000.0          # 2025-2029 (OBBBA); phased down above USD 500k MAGI
+SALT_CAP = 40_000.0  # 2025-2029 (OBBBA); phased down above USD 500k MAGI
 
 
 @dataclass
@@ -266,19 +305,24 @@ def _num(x) -> float:
 def state_income_tax(wages: float, married: bool, n_dep: int, st: dict | None) -> float:
     if not st or not str(st.get("brackets_single", "")).strip():
         return 0.0
-    from .params import parse_rate_brackets
     br = parse_rate_brackets(st["brackets_mfj" if married else "brackets_single"])
     std = _num(st["std_mfj" if married else "std_single"])
     ex = _num(st["exempt_mfj" if married else "exempt_single"]) + n_dep * _num(st["exempt_dep"])
     tax = bracket_tax(max(wages - std - ex, 0), br)
-    tax -= _num(st["credit_mfj" if married else "credit_single"]) + n_dep * _num(
-        st["credit_dep"])
+    tax -= _num(st["credit_mfj" if married else "credit_single"]) + n_dep * _num(st["credit_dep"])
     return max(tax, 0.0)
 
 
-def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
-                    p: USParams, st: dict | None, mortgage_interest: float = 0.0,
-                    property_tax: float = 0.0) -> USResidentTax:
+def us_resident_tax(
+    wages: list[float],
+    married: bool,
+    n_ctc: int,
+    n_dep: int,
+    p: USParams,
+    st: dict | None,
+    mortgage_interest: float = 0.0,
+    property_tax: float = 0.0,
+) -> USResidentTax:
     """Federal + state + local income tax and employee payroll taxes for a US-resident
     couple (USD/year). Itemises when mortgage interest + SALT beat the standard
     deduction; child tax credit with the refundable part; earned income tax credit."""
@@ -286,8 +330,9 @@ def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
     fica = sum(us_fica(w, p) for w in wages)
     payroll = sum(wages) * _num(st.get("payroll_pct")) / 100 if st else 0.0
     local_rate = _num(st.get("local_rate")) / 100 if st else 0.0
-    units = [(wages, n_ctc, n_dep)] if married else \
-        [([wages[0]], n_ctc, n_dep), ([wages[1]], 0, 0)]
+    units = (
+        [(wages, n_ctc, n_dep)] if married else [([wages[0]], n_ctc, n_dep), ([wages[1]], 0, 0)]
+    )
     fed = s_tax = loc = 0.0
     for inc, kids, deps in units:
         agi = sum(inc)
@@ -312,8 +357,9 @@ def us_resident_tax(wages: list[float], married: bool, n_ctc: int, n_dep: int,
     return USResidentTax(fed, s_tax, loc, fica, payroll)
 
 
-def youth_tax_factor(iso3: str, age: int, gross: float, aw: float, years_working: int,
-                     mother_of_two: bool = False) -> float:
+def youth_tax_factor(
+    iso3: str, age: int, gross: float, aw: float, years_working: int, mother_of_two: bool = False
+) -> float:
     """Share of the income tax still due after age-based exemptions (2026 rules):
     PL PIT-0 under 26 (to PLN 85,528); HU under 25 (to the average wage) and mothers of
     two under 40 (2026); HR under 25 exempt, 25-30 half; PT IRS Jovem (<=35, first 10
@@ -331,8 +377,15 @@ def youth_tax_factor(iso3: str, age: int, gross: float, aw: float, years_working
     if iso3 == "HRV":
         return 0.0 if age < 25 else 0.5 if age <= 30 else 1.0
     if iso3 == "PRT" and age <= 35 and years_working < 10:
-        pct = 1.0 if years_working < 1 else 0.75 if years_working < 4 else \
-            0.5 if years_working < 7 else 0.25
+        pct = (
+            1.0
+            if years_working < 1
+            else 0.75
+            if years_working < 4
+            else 0.5
+            if years_working < 7
+            else 0.25
+        )
         return 1 - pct * min(1.0, 28_737 / gross)
     if iso3 == "GRC":
         if age <= 25:

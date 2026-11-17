@@ -1,4 +1,5 @@
 """Engine tests on a synthetic country (no downloaded data needed)."""
+
 from __future__ import annotations
 
 import math
@@ -6,16 +7,26 @@ from dataclasses import replace
 
 import pytest
 
-from econsim.engine import interp_profile, nrr_for_month, simulate, to_display
+from econsim.engine import simulate, to_display
 from econsim.model import CountryData, Earner, JobLoss, Plan, Sourced, TaxPoint
-from econsim.tax import (USParams, bracket_tax, local_rates, parse_brackets,
-                         us_expat_tax)
+from econsim.money import interp_profile, nrr_for_month
+from econsim.tax import USParams, bracket_tax, local_rates, parse_brackets, us_expat_tax
 
 US = USParams(
     brackets_mfj=parse_brackets("10:0;12:24800;22:100800;24:211400;32:403550;35:512450;37:768700"),
-    brackets_single=parse_brackets("10:0;12:12400;22:50400;24:105700;32:201775;35:256225;37:640600"),
-    std_mfj=32200, std_single=16100, ctc=2200, ctc_refundable=1700, feie=132900,
-    housing_base=21264, housing_limit=39870, fica_rate=0.0765, ss_wage_base=184500)
+    brackets_single=parse_brackets(
+        "10:0;12:12400;22:50400;24:105700;32:201775;35:256225;37:640600"
+    ),
+    std_mfj=32200,
+    std_single=16100,
+    ctc=2200,
+    ctc_refundable=1700,
+    feie=132900,
+    housing_base=21264,
+    housing_limit=39870,
+    fica_rate=0.0765,
+    ss_wage_base=184500,
+)
 
 
 def S(v, unit="", year=2026):
@@ -24,33 +35,67 @@ def S(v, unit="", year=2026):
 
 def country(**kw) -> CountryData:
     base = dict(
-        iso3="TST", name="Testland", currency="EUR", data_year=2026,
-        earnings={"median": [(25, 30000.0), (35, 40000.0), (45, 45000.0), (55, 45000.0)],
-                  "p25": [(25, 24000.0), (55, 34000.0)],
-                  "p75": [(25, 38000.0), (55, 60000.0)]},
+        iso3="TST",
+        name="Testland",
+        currency="EUR",
+        data_year=2026,
+        earnings={
+            "median": [(25, 30000.0), (35, 40000.0), (45, 45000.0), (55, 45000.0)],
+            "p25": [(25, 24000.0), (55, 34000.0)],
+            "p75": [(25, 38000.0), (55, 60000.0)],
+        },
         earnings_src=S(float("nan")),
-        tax_points=[TaxPoint(0.5, 0.05, 0.15), TaxPoint(1.0, 0.15, 0.15),
-                    TaxPoint(1.67, 0.25, 0.12)],
-        avg_wage=S(40000.0), marginal_rate_top=0.45, tax_src=S(float("nan")),
-        child_benefit_per_child=S(2000.0), budget={"groceries": S(600.0), "other": S(1400.0)},
-        rent=S(1000.0), rent_factor_per_child=[1.1, 1.2], rent_factor_src=S(1.1),
-        home_price=S(300000.0), down_payment_pct=S(20.0), transfer_tax_pct=S(3.0),
-        mortgage_rate=S(4.0), wedding_cost=S(15000.0), child_extra_spending=S(400.0),
-        childcare_per_child=S(6000.0), emergency_expense_size=S(1000.0),
+        tax_points=[
+            TaxPoint(0.5, 0.05, 0.15),
+            TaxPoint(1.0, 0.15, 0.15),
+            TaxPoint(1.67, 0.25, 0.12),
+        ],
+        avg_wage=S(40000.0),
+        marginal_rate_top=0.45,
+        tax_src=S(float("nan")),
+        child_benefit_per_child=S(2000.0),
+        budget={"groceries": S(600.0), "other": S(1400.0)},
+        rent=S(1000.0),
+        rent_factor_per_child=[1.1, 1.2],
+        rent_factor_src=S(1.1),
+        home_price=S(300000.0),
+        down_payment_pct=S(20.0),
+        transfer_tax_pct=S(3.0),
+        mortgage_rate=S(4.0),
+        wedding_cost=S(15000.0),
+        child_extra_spending=S(400.0),
+        childcare_per_child=S(6000.0),
+        emergency_expense_size=S(1000.0),
         nrr={2: S(80.0), 6: S(70.0), 12: S(60.0), 24: S(50.0)},
-        unemployment_rate=S(6.0), inflation_hist=S(2.5), real_wage_growth_hist=S(0.8),
-        lcu_per_usd=S(0.9), lcu_per_intl=S(0.7), totalization=True)
+        unemployment_rate=S(6.0),
+        inflation_hist=S(2.5),
+        real_wage_growth_hist=S(0.8),
+        lcu_per_usd=S(0.9),
+        lcu_per_intl=S(0.7),
+        totalization=True,
+    )
     base.update(kw)
     return CountryData(**base)
 
 
 def plan(**kw) -> Plan:
-    base = dict(country="TST", earners=(Earner(28), Earner(27)), horizon_age=60,
-                marriage_age=None, child_ages=(None, None), buy_house_age=None,
-                inflation=2.0, real_wage_growth=1.0, return_nominal=5.0, us_citizens=False,
-                # mechanism tests: the calibrated behaviour held neutral (own tests below)
-                wealth_mpc=0.0, housing_elasticity=0.0, car_elasticity=0.0,
-                budget_elasticity=0.8)
+    base = dict(
+        country="TST",
+        earners=(Earner(28), Earner(27)),
+        horizon_age=60,
+        marriage_age=None,
+        child_ages=(None, None),
+        buy_house_age=None,
+        inflation=2.0,
+        real_wage_growth=1.0,
+        return_nominal=5.0,
+        us_citizens=False,
+        # mechanism tests: the calibrated behaviour held neutral (own tests below)
+        wealth_mpc=0.0,
+        housing_elasticity=0.0,
+        car_elasticity=0.0,
+        budget_elasticity=0.8,
+    )
     base.update(kw)
     return Plan(**base)
 
@@ -66,7 +111,7 @@ def test_local_rates_interpolate_and_extrapolate():
     pts = country().tax_points
     it, ssc = local_rates(40000, 40000, pts, 0.45)
     assert it == pytest.approx(6000) and ssc == pytest.approx(6000)
-    it2, _ = local_rates(48000, 40000, pts, 0.45)   # 1.2 AW: between 1.0 and 1.67
+    it2, _ = local_rates(48000, 40000, pts, 0.45)  # 1.2 AW: between 1.0 and 1.67
     assert 0.15 < it2 / 48000 < 0.25
     it3, ssc3 = local_rates(100000, 40000, pts, 0.45)  # above the top point
     g_top = 1.67 * 40000
@@ -124,7 +169,7 @@ def test_real_display_removes_inflation():
     # with zero real growth, real rent stays constant
     assert real["rent"].iloc[0] == pytest.approx(real["rent"].iloc[10])
     nominal = to_display(r, country(), real=False)
-    assert nominal["rent"].iloc[10] == pytest.approx(nominal["rent"].iloc[0] * 1.02 ** 10)
+    assert nominal["rent"].iloc[10] == pytest.approx(nominal["rent"].iloc[0] * 1.02**10)
 
 
 def test_currency_conversion():
@@ -149,19 +194,20 @@ def test_wedding_is_one_off():
     r = simulate(plan(marriage_age=30), country())
     d = r.years
     # prices x living standards (real wage growth 1%): weddings get richer too
-    assert d["oneoff:wedding"].iloc[2] == pytest.approx(15000 * 1.02 ** 2 * 1.01 ** 2)
+    assert d["oneoff:wedding"].iloc[2] == pytest.approx(15000 * 1.02**2 * 1.01**2)
     assert d["oneoff:wedding"].drop(index=2).sum() == 0
     assert any(e["event"] == "Marriage" for e in r.events)
 
 
 def test_house_purchase_and_mortgage_amortisation():
-    r = simulate(plan(buy_house_age=33, starting_savings=150000,
-                      home_real_appreciation=0.5), country())
+    r = simulate(
+        plan(buy_house_age=33, starting_savings=150000, home_real_appreciation=0.5), country()
+    )
     d = r.years
     t = 33 - 28
     assert d["owned"].iloc[t] and not d["owned"].iloc[t - 1]
     assert d["rent"].iloc[t] == 0
-    assert d["mortgage_balance"].iloc[t] < 300000 * 1.02 ** t * 1.005 ** t * 0.8
+    assert d["mortgage_balance"].iloc[t] < 300000 * 1.02**t * 1.005**t * 0.8
     # 25-year mortgage is paid off by the end of term
     assert d["mortgage_balance"].iloc[t + 25] == pytest.approx(0, abs=1)
     assert d["home_equity"].iloc[-1] > 0
@@ -222,3 +268,35 @@ def test_payment_to_income_cap_blocks_unaffordable_house():
     r = simulate(plan(buy_house_age=30, starting_savings=2_000_000), cd)
     assert not r.years["owned"].any()
     assert any("payment" in w for w in r.warnings)
+
+
+def test_protect_savings_cuts_extras_before_using_savings():
+    """A job loss: households that protect their savings cut optional spending in that
+    year; the default keeps spending and draws on savings (it only cuts once they run
+    out)."""
+    base = dict(job_loss=JobLoss(earner=0, age=33, months=12), starting_savings=60000.0)
+    c = country(
+        budget={
+            "groceries": S(600.0),
+            "recreation": S(500.0),
+            "restaurants_hotels": S(400.0),
+            "other": S(900.0),
+        }
+    )
+    a = simulate(plan(**base), c).years.set_index("age1")
+    b = simulate(plan(protect_savings=True, **base), c).years.set_index("age1")
+    assert a.loc[33, "spending_squeeze"] == 0
+    assert b.loc[33, "spending_squeeze"] > 0
+    assert b.loc[33, "liquid"] > a.loc[33, "liquid"]
+    # no difference in years when income covers the bills
+    assert a.loc[30, "expenses_recurring"] == pytest.approx(b.loc[30, "expenses_recurring"])
+
+
+def test_budget_constraint_off_shows_planned_spending():
+    """Calibration fits what households plan to spend: without the cuts, a household
+    that overspends runs into debt rather than having its spending cut."""
+    on = simulate(plan(spending_level=1.8), country()).years
+    off = simulate(plan(spending_level=1.8, budget_constraint=False), country()).years
+    assert on["spending_squeeze"].sum() > 0
+    assert off["spending_squeeze"].sum() == 0
+    assert off["liquid"].min() < on["liquid"].min()

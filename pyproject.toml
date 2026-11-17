@@ -1,0 +1,19 @@
+[project]
+name = "economic-calculator"
+version = "0.9.0"
+description = "Simulate a couple's working life and retirement in Europe, the US and Canada from official statistics"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 99
+extend-exclude = ["reference"]
+
+[tool.ruff.lint]
+# errors, undefined or unused names, import order, line length (layout: `ruff format`)
+select = ["F", "E9", "E501", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["econsim", "econdata", "ui", "tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

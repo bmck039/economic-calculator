@@ -26,6 +26,7 @@ services:
       HOST: 0.0.0.0
       PORT: "8501"
       OPEN_BROWSER: "false"
+      RUN_TESTS: "never"           # every release passed the full suite on GitHub first
     volumes:
       - econ-data:/app/econ_data    # downloaded + derived data survives rebuilds
     # Uncomment to also reach it from this machine at http://localhost:8501/

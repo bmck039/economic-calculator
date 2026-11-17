@@ -3,6 +3,7 @@
 The live checks only run with FRED_SMOKE=1 (they need the network):
     FRED_SMOKE=1 pytest tests/test_fred.py
 """
+
 import json
 import os
 import sys
@@ -12,15 +13,24 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import build_econ_dataset as b  # noqa: E402
+from econdata.build import missing_countries
+from econdata.clients import FRED_API, FRED_CSV, fred
+from econdata.config import COUNTRIES
+from econdata.derive.budget import _split_unsplit_cp04
+from econdata.fetch import CachedFetcher, FetchError, redact
 
 CSV = b"observation_date,JTSJOR\n2024-01-01,5.4\n2024-02-01,.\n2024-03-01,5.2\n"
-API = json.dumps({"observations": [
-    {"realtime_start": "2026-01-01", "realtime_end": "2026-01-01", "date": d, "value": v}
-    for d, v in [("2024-01-01", "5.4"), ("2024-02-01", "."), ("2024-03-01", "5.2")]]}).encode()
+API = json.dumps(
+    {
+        "observations": [
+            {"realtime_start": "2026-01-01", "realtime_end": "2026-01-01", "date": d, "value": v}
+            for d, v in [("2024-01-01", "5.4"), ("2024-02-01", "."), ("2024-03-01", "5.2")]
+        ]
+    }
+).encode()
 
 
-class FakeFetcher(b.CachedFetcher):
+class FakeFetcher(CachedFetcher):
     """Records requests and answers from `responses` (url -> bytes or exception)."""
 
     def __init__(self, tmp_path, responses):
@@ -45,9 +55,9 @@ def check(df):
 
 def test_csv_endpoint_without_key(tmp_path, monkeypatch):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
-    f = FakeFetcher(tmp_path, {b.FRED_CSV: CSV})
-    check(b.fred(f, "JTSJOR"))
-    (url, params, kw), = f.calls
+    f = FakeFetcher(tmp_path, {FRED_CSV: CSV})
+    check(fred(f, "JTSJOR"))
+    ((url, params, kw),) = f.calls
     assert params == {"id": "JTSJOR"}
     # Regression guard: FRED's edge stalled the pipeline's own UA; keep requests' default.
     assert kw["headers"]["User-Agent"].startswith("python-requests/")
@@ -56,55 +66,61 @@ def test_csv_endpoint_without_key(tmp_path, monkeypatch):
 
 def test_api_with_key(tmp_path, monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "abc123")
-    f = FakeFetcher(tmp_path, {b.FRED_API: API})
-    check(b.fred(f, "JTSJOR"))
-    (url, params, _), = f.calls
-    assert url == b.FRED_API and params["api_key"] == "abc123" and params["file_type"] == "json"
+    f = FakeFetcher(tmp_path, {FRED_API: API})
+    check(fred(f, "JTSJOR"))
+    ((url, params, _),) = f.calls
+    assert url == FRED_API and params["api_key"] == "abc123" and params["file_type"] == "json"
 
 
 def test_api_failure_falls_back_to_csv(tmp_path, monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "abc123")
-    f = FakeFetcher(tmp_path, {b.FRED_API: b.FetchError("timeout"), b.FRED_CSV: CSV})
-    check(b.fred(f, "JTSJOR"))
-    assert [c[0] for c in f.calls] == [b.FRED_API, b.FRED_CSV]
+    f = FakeFetcher(tmp_path, {FRED_API: FetchError("timeout"), FRED_CSV: CSV})
+    check(fred(f, "JTSJOR"))
+    assert [c[0] for c in f.calls] == [FRED_API, FRED_CSV]
 
 
 def test_rejected_key_disables_api_for_the_run(tmp_path, monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "bad")
-    err = b.FetchError("HTTP 400: Bad Request.  The value for variable api_key is not registered.")
-    f = FakeFetcher(tmp_path, {b.FRED_API: err, b.FRED_CSV: CSV})
-    b.fred(f, "A")
-    b.fred(f, "B")
-    assert [c[0] for c in f.calls] == [b.FRED_API, b.FRED_CSV, b.FRED_CSV]
+    err = FetchError("HTTP 400: Bad Request.  The value for variable api_key is not registered.")
+    f = FakeFetcher(tmp_path, {FRED_API: err, FRED_CSV: CSV})
+    fred(f, "A")
+    fred(f, "B")
+    assert [c[0] for c in f.calls] == [FRED_API, FRED_CSV, FRED_CSV]
 
 
 def test_csv_not_a_csv(tmp_path, monkeypatch):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
-    f = FakeFetcher(tmp_path, {b.FRED_CSV: b"<html>error</html>"})
-    with pytest.raises(b.FetchError):
-        b.fred(f, "NOPE")
+    f = FakeFetcher(tmp_path, {FRED_CSV: b"<html>error</html>"})
+    with pytest.raises(FetchError):
+        fred(f, "NOPE")
 
 
 def test_redact():
-    assert b.redact("https://x/obs?series_id=A&api_key=SECRET&file_type=json") == \
-        "https://x/obs?series_id=A&api_key=***&file_type=json"
-    assert b.redact("https://api.census.gov/data?get=NAME&for=us:1&key=SECRET") == \
-        "https://api.census.gov/data?get=NAME&for=us:1&key=***"
-    assert b.redact("https://x/?monkey=1") == "https://x/?monkey=1"
+    assert (
+        redact("https://x/obs?series_id=A&api_key=SECRET&file_type=json")
+        == "https://x/obs?series_id=A&api_key=***&file_type=json"
+    )
+    assert (
+        redact("https://api.census.gov/data?get=NAME&for=us:1&key=SECRET")
+        == "https://api.census.gov/data?get=NAME&for=us:1&key=***"
+    )
+    assert redact("https://x/?monkey=1") == "https://x/?monkey=1"
 
 
 def test_missing_countries():
-    every = pd.DataFrame({"iso3": list(b.COUNTRIES)})
-    assert b.missing_countries({"earnings_profile": every, "tax_curve": every}) == []
+    every = pd.DataFrame({"iso3": list(COUNTRIES)})
+    assert missing_countries({"earnings_profile": every, "tax_curve": every}) == []
     no_us = every[every["iso3"] != "USA"]
-    assert b.missing_countries({"earnings_profile": no_us, "tax_curve": every}) == ["USA"]
-    assert b.missing_countries({"earnings_profile": pd.DataFrame(), "tax_curve": every}) == \
-        sorted(b.COUNTRIES)
+    assert missing_countries({"earnings_profile": no_us, "tax_curve": every}) == ["USA"]
+    assert missing_countries({"earnings_profile": pd.DataFrame(), "tax_curve": every}) == sorted(
+        COUNTRIES
+    )
 
 
 # ------------------------------------------------------------------ live (opt-in)
-live = pytest.mark.skipif(os.environ.get("FRED_SMOKE") != "1",
-                          reason="set FRED_SMOKE=1 to hit the live FRED endpoints")
+live = pytest.mark.skipif(
+    os.environ.get("FRED_SMOKE") != "1", reason="set FRED_SMOKE=1 to hit the live FRED endpoints"
+)
 
 
 @live
@@ -114,22 +130,35 @@ def test_live_fred(tmp_path, monkeypatch, use_api):
         pytest.skip("FRED_API_KEY not set")
     if not use_api:
         monkeypatch.delenv("FRED_API_KEY", raising=False)
-    f = b.CachedFetcher(tmp_path, refresh=True)
-    df = b.fred(f, "LEU0252881500A")          # CPS median weekly earnings (US earnings)
+    f = CachedFetcher(tmp_path, refresh=True)
+    df = fred(f, "LEU0252881500A")  # CPS median weekly earnings (US earnings)
     assert len(df) > 20 and df["value"].gt(0).all()
     assert all(r["how"] == "network" for r in f.log_rows), f.log_rows
 
 
 def test_unsplit_cp04_keeps_only_utilities():
     """A country without COICOP 04 detail must not carry rent inside its living budget."""
-    rows = [{"category": "cp04_unsplit", "coicop": "CP04", "monthly_local": 1000.0,
-             "monthly_intl_dollars": 1500.0, "method": "m"},
-            {"category": "clothing", "coicop": "CP03", "monthly_local": 50.0,
-             "monthly_intl_dollars": 75.0, "method": "m"}]
+    rows = [
+        {
+            "category": "cp04_unsplit",
+            "coicop": "CP04",
+            "monthly_local": 1000.0,
+            "monthly_intl_dollars": 1500.0,
+            "method": "m",
+        },
+        {
+            "category": "clothing",
+            "coicop": "CP03",
+            "monthly_local": 50.0,
+            "monthly_intl_dollars": 75.0,
+            "method": "m",
+        },
+    ]
     split = {"CP043": [0.02, 0.04], "CP044": [0.08, 0.10], "CP045": [0.20, 0.24]}
-    out = b._split_unsplit_cp04(rows, split)
+    out = _split_unsplit_cp04(rows, split)
     cats = {r["category"]: r["monthly_local"] for r in out}
     assert "cp04_unsplit" not in cats and cats["clothing"] == 50.0
-    assert cats == pytest.approx({"clothing": 50.0, "home_maintenance": 30.0,
-                                  "water_refuse": 90.0, "energy_home": 220.0})
-    assert b._split_unsplit_cp04(rows, {"CP043": [], "CP044": [], "CP045": []}) == rows[1:]
+    assert cats == pytest.approx(
+        {"clothing": 50.0, "home_maintenance": 30.0, "water_refuse": 90.0, "energy_home": 220.0}
+    )
+    assert _split_unsplit_cp04(rows, {"CP043": [], "CP044": [], "CP045": []}) == rows[1:]

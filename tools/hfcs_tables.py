@@ -13,6 +13,7 @@ households. The CSV is committed so the data build needs neither the PDFs nor po
 
     python tools/hfcs_tables.py [--pdf-dir DIR]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,7 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 BASE = "https://www.ecb.europa.eu/home/pdf/research/hfcn/"
-WAVES = {   # wave -> file (the ECB's file names do not follow the waves)
+WAVES = {  # wave -> file (the ECB's file names do not follow the waves)
     2010: "HFCS_Statistical_Tables_Wave2010.pdf",
     2014: "HFCS_Statistical_Tables_Wave1.pdf",
     2017: "HFCS_Statistical_Tables_Wave_2017_July2023.pdf",
@@ -41,24 +42,66 @@ TABLES = {
     "E6": "debt_median",
     "I1": "income_median",
 }
-ISO2 = {"BE": "BEL", "CZ": "CZE", "DE": "DEU", "EE": "EST", "IE": "IRL", "GR": "GRC",
-        "ES": "ESP", "FR": "FRA", "HR": "HRV", "IT": "ITA", "CY": "CYP", "LV": "LVA",
-        "LT": "LTU", "LU": "LUX", "HU": "HUN", "MT": "MLT", "NL": "NLD", "AT": "AUT",
-        "PL": "POL", "PT": "PRT", "SI": "SVN", "SK": "SVK", "FI": "FIN", "EA": "EA"}
-COUNTRY_NAMES = {"Belgium": "BEL", "Czech Republic": "CZE", "Czechia": "CZE",
-                 "Germany": "DEU", "Estonia": "EST", "Ireland": "IRL", "Greece": "GRC",
-                 "Spain": "ESP", "France": "FRA", "Croatia": "HRV", "Italy": "ITA",
-                 "Cyprus": "CYP", "Latvia": "LVA", "Lithuania": "LTU", "Luxembourg": "LUX",
-                 "Hungary": "HUN", "Malta": "MLT", "Netherlands": "NLD", "Austria": "AUT",
-                 "Poland": "POL", "Portugal": "PRT", "Slovenia": "SVN", "Slovakia": "SVK",
-                 "Finland": "FIN"}
+ISO2 = {
+    "BE": "BEL",
+    "CZ": "CZE",
+    "DE": "DEU",
+    "EE": "EST",
+    "IE": "IRL",
+    "GR": "GRC",
+    "ES": "ESP",
+    "FR": "FRA",
+    "HR": "HRV",
+    "IT": "ITA",
+    "CY": "CYP",
+    "LV": "LVA",
+    "LT": "LTU",
+    "LU": "LUX",
+    "HU": "HUN",
+    "MT": "MLT",
+    "NL": "NLD",
+    "AT": "AUT",
+    "PL": "POL",
+    "PT": "PRT",
+    "SI": "SVN",
+    "SK": "SVK",
+    "FI": "FIN",
+    "EA": "EA",
+}
+COUNTRY_NAMES = {
+    "Belgium": "BEL",
+    "Czech Republic": "CZE",
+    "Czechia": "CZE",
+    "Germany": "DEU",
+    "Estonia": "EST",
+    "Ireland": "IRL",
+    "Greece": "GRC",
+    "Spain": "ESP",
+    "France": "FRA",
+    "Croatia": "HRV",
+    "Italy": "ITA",
+    "Cyprus": "CYP",
+    "Latvia": "LVA",
+    "Lithuania": "LTU",
+    "Luxembourg": "LUX",
+    "Hungary": "HUN",
+    "Malta": "MLT",
+    "Netherlands": "NLD",
+    "Austria": "AUT",
+    "Poland": "POL",
+    "Portugal": "PRT",
+    "Slovenia": "SVN",
+    "Slovakia": "SVK",
+    "Finland": "FIN",
+}
 VAL = re.compile(r"^(-?\d[\d,]*\.?\d*|M|N|<0\.1|-)$")
 TITLE = re.compile(r"^\s*Table ([A-Z]\d+) (.+?)\s*$")
 
 
 def text_pages(pdf: Path) -> list[str]:
-    out = subprocess.run(["pdftotext", "-layout", str(pdf), "-"], check=True,
-                         capture_output=True, text=True).stdout
+    out = subprocess.run(
+        ["pdftotext", "-layout", str(pdf), "-"], check=True, capture_output=True, text=True
+    ).stdout
     return out.split("\f")
 
 
@@ -75,7 +118,7 @@ def parse_tables(pages: list[str], wave: int) -> list[dict]:
     pending_val = None
     for page in pages:
         for line in page.splitlines():
-            if "...." in line:          # table of contents
+            if "...." in line:  # table of contents
                 continue
             m = TITLE.match(line)
             if m:
@@ -87,13 +130,13 @@ def parse_tables(pages: list[str], wave: int) -> list[dict]:
             if not toks:
                 continue
             codes = [t for t in toks if t in ISO2 and t != "EA"]
-            if len(codes) >= 4 and len(codes) >= len(toks) - 2:      # column header
+            if len(codes) >= 4 and len(codes) >= len(toks) - 2:  # column header
                 cols = (["EA"] if "area" in toks else []) + codes
                 continue
             if cols is None:
                 continue
             s = line.strip()
-            if s.startswith("("):       # standard errors of the row above
+            if s.startswith("("):  # standard errors of the row above
                 if pending_val is not None:
                     ses = [t.strip("()") for t in s.split()]
                     for r, se in zip(pending_val, ses):
@@ -128,9 +171,18 @@ def parse_tables(pages: list[str], wave: int) -> list[dict]:
                 row = parts[0]
             new = []
             for c, v in zip(cols, vals):
-                new.append({"wave": wave, "iso3": ISO2[c], "table": table,
-                            "indicator": TABLES[table], "group": group, "row": row,
-                            "value": _num(v), "se": None})
+                new.append(
+                    {
+                        "wave": wave,
+                        "iso3": ISO2[c],
+                        "table": table,
+                        "indicator": TABLES[table],
+                        "group": group,
+                        "row": row,
+                        "value": _num(v),
+                        "se": None,
+                    }
+                )
             rows += new
             pending_val = new
             del label
@@ -148,8 +200,11 @@ def parse_reference(pages: list[str], wave: int) -> list[dict]:
                 continue
             if not on:
                 continue
-            m = re.match(r"^\s*([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(\d{2})/(\d{4})\s*[–-]?\s*"
-                         r"(\d{2})/(\d{4})(.*)$", line)
+            m = re.match(
+                r"^\s*([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(\d{2})/(\d{4})\s*[–-]?\s*"
+                r"(\d{2})/(\d{4})(.*)$",
+                line,
+            )
             if m and m.group(1) in COUNTRY_NAMES:
                 a = int(m.group(3)) + (int(m.group(2)) - 0.5) / 12
                 b = int(m.group(5)) + (int(m.group(4)) - 0.5) / 12
@@ -167,8 +222,18 @@ def parse_reference(pages: list[str], wave: int) -> list[dict]:
                     iy = mid - 0.5
                 iso = COUNTRY_NAMES[m.group(1)]
                 for ind, v in (("fieldwork_mid", mid), ("income_year_mid", iy)):
-                    rows.append({"wave": wave, "iso3": iso, "table": "REF", "indicator": ind,
-                                 "group": "", "row": "", "value": round(v, 2), "se": None})
+                    rows.append(
+                        {
+                            "wave": wave,
+                            "iso3": iso,
+                            "table": "REF",
+                            "indicator": ind,
+                            "group": "",
+                            "row": "",
+                            "value": round(v, 2),
+                            "se": None,
+                        }
+                    )
         if on and rows:
             break
     return rows
@@ -177,8 +242,9 @@ def parse_reference(pages: list[str], wave: int) -> list[dict]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdf-dir", default=None)
-    ap.add_argument("--out", default=str(Path(__file__).resolve().parents[1]
-                                         / "reference" / "hfcs_tables.csv"))
+    ap.add_argument(
+        "--out", default=str(Path(__file__).resolve().parents[1] / "reference" / "hfcs_tables.csv")
+    )
     a = ap.parse_args()
     d = Path(a.pdf_dir) if a.pdf_dir else Path.cwd() / "hfcs_pdf"
     d.mkdir(parents=True, exist_ok=True)

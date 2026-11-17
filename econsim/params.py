@@ -7,6 +7,7 @@ Every value carries a source and a quality grade (A official/statutory, B offici
 but approximated, C estimate). They ship with the code, so changing one does not
 need a data rebuild.
 """
+
 from __future__ import annotations
 
 import math
@@ -68,10 +69,15 @@ def housing_item(iso3: str, key: str) -> Sourced | None:
         return None
     r = r.iloc[0]
     q = str(r["quality"])
-    return Sourced(float(r["value"]), str(r["unit"]), str(r["source"]),
-                   None if pd.isna(r["year"]) else str(int(r["year"])),
-                   q == "C" or str(r["source"]).startswith("ESTIMATE"), q,
-                   "" if pd.isna(r["note"]) else str(r["note"]))
+    return Sourced(
+        float(r["value"]),
+        str(r["unit"]),
+        str(r["source"]),
+        None if pd.isna(r["year"]) else str(int(r["year"])),
+        q == "C" or str(r["source"]).startswith("ESTIMATE"),
+        q,
+        "" if pd.isna(r["note"]) else str(r["note"]),
+    )
 
 
 def lending(iso3: str) -> dict:
@@ -79,8 +85,9 @@ def lending(iso3: str) -> dict:
     if iso3 not in t.index:
         return {}
     r = t.loc[iso3]
-    out = {k: (_num(v) if k not in ("dsti_basis", "source", "quality") else v)
-           for k, v in r.items()}
+    out = {
+        k: (_num(v) if k not in ("dsti_basis", "source", "quality") else v) for k, v in r.items()
+    }
     return out
 
 

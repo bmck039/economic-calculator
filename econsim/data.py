@@ -3,17 +3,20 @@
 Only the compact derived tables are read (never econ_long.csv), so the UI starts
 in a second or two.
 """
+
 from __future__ import annotations
 
 import math
 import re
 from functools import lru_cache
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
 from . import params as P
+from .career import CareerData, from_country
+from .cohort import CohortData, fit_all
 from .model import CountryData, Sourced, TaxPoint
 from .tax import USParams, parse_brackets
 
@@ -21,8 +24,14 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "econ_data"
 
 # budget categories that are tenure-specific (handled by the rent/own switch) or
 # totals - excluded from the baseline couple budget
-TENURE = {"rent_actual", "rent_imputed_owners", "owner_costs_mortgage_tax_maint",
-          "other_items_incl_mortgage_interest", "housing_net_fuel_power", "TOTAL"}
+TENURE = {
+    "rent_actual",
+    "rent_imputed_owners",
+    "owner_costs_mortgage_tax_maint",
+    "other_items_incl_mortgage_interest",
+    "housing_net_fuel_power",
+    "TOTAL",
+}
 UTILITY_CATS = {"energy_home", "water_refuse"}
 COUNTRY_NAMES: dict[str, str] = {}
 
@@ -34,8 +43,11 @@ def _nan(x) -> bool:
 class DataStore:
     def __init__(self, data_dir: Path | str = DATA_DIR):
         self.dir = Path(data_dir)
-        rd = lambda n: pd.read_csv(self.dir / f"{n}.csv") if (self.dir / f"{n}.csv").exists() \
-            else pd.DataFrame()  # noqa: E731
+        rd = lambda n: (
+            pd.read_csv(self.dir / f"{n}.csv")
+            if (self.dir / f"{n}.csv").exists()
+            else pd.DataFrame()
+        )  # noqa: E731
         self.budget = rd("couple_budget")
         self.life = rd("life_events")
         self.earn = rd("earnings_profile")
@@ -49,8 +61,11 @@ class DataStore:
         self.snap = rd("country_snapshot")
         self.labour = rd("labour_market")
         self.edu_pay = rd("education_pay")
-        self.family = pd.read_csv(self.dir / "family.csv", dtype={"n_children": str}) \
-            if (self.dir / "family.csv").exists() else pd.DataFrame()
+        self.family = (
+            pd.read_csv(self.dir / "family.csv", dtype={"n_children": str})
+            if (self.dir / "family.csv").exists()
+            else pd.DataFrame()
+        )
         self.coverage = rd("budget_coverage")
         self.pensions = rd("pensions")
         self.market = rd("market_index")
@@ -81,17 +96,26 @@ class DataStore:
 
     def life_item(self, iso3: str, item: str, contains: bool = False) -> Sourced | None:
         l = self.life[self.life["iso3"] == iso3]
-        l = l[l["item"].astype(str).str.contains(item, regex=False)] if contains else \
-            l[l["item"] == item]
+        l = (
+            l[l["item"].astype(str).str.contains(item, regex=False)]
+            if contains
+            else l[l["item"] == item]
+        )
         if l.empty:
             return None
         r = l.iloc[0]
         q = str(r.get("quality", "") or "")
         txt = str(r.get("source", "")) + " " + str(r.get("method", ""))
         est = q == "C" or "ESTIMATE" in txt or txt.lower().startswith("assumption")
-        return Sourced(float(r["value"]), str(r["unit"]), str(r["source"]),
-                       None if _nan(r["year"]) else str(r["year"])[:7], est, q,
-                       str(r.get("method", "") or ""))
+        return Sourced(
+            float(r["value"]),
+            str(r["unit"]),
+            str(r["source"]),
+            None if _nan(r["year"]) else str(r["year"])[:7],
+            est,
+            q,
+            str(r.get("method", "") or ""),
+        )
 
     def fx_latest(self, iso3: str, col: str):
         d = self.fx[(self.fx["iso3"] == iso3) & self.fx[col].notna()].sort_values("year")
@@ -102,8 +126,9 @@ class DataStore:
     def context(self, iso3: str, indicator: str) -> pd.DataFrame:
         if self.ctx.empty:
             return self.ctx
-        return self.ctx[(self.ctx["iso3"] == iso3) & (self.ctx["indicator"] == indicator)] \
-            .sort_values("year")
+        return self.ctx[
+            (self.ctx["iso3"] == iso3) & (self.ctx["indicator"] == indicator)
+        ].sort_values("year")
 
     # ------------------------------------------------------------ US params
     def us_params(self) -> USParams:
@@ -114,17 +139,25 @@ class DataStore:
         def br(item, default):
             r = self.ref("USA", item)
             return parse_brackets(r["note"]) if r is not None else parse_brackets(default)
+
         feie = v("feie_max_exclusion", 132900)
         return USParams(
-            brackets_mfj=br("brackets_mfj", "10:0;12:24800;22:100800;24:211400;32:403550;"
-                                            "35:512450;37:768700"),
-            brackets_single=br("brackets_single", "10:0;12:12400;22:50400;24:105700;"
-                                                  "32:201775;35:256225;37:640600"),
-            std_mfj=v("std_deduction_mfj", 32200), std_single=v("std_deduction_single", 16100),
-            ctc=v("child_tax_credit", 2200), ctc_refundable=v("child_tax_credit_refundable", 1700),
-            feie=feie, housing_base=v("foreign_housing_base_amount", 0.16 * feie),
+            brackets_mfj=br(
+                "brackets_mfj", "10:0;12:24800;22:100800;24:211400;32:403550;35:512450;37:768700"
+            ),
+            brackets_single=br(
+                "brackets_single", "10:0;12:12400;22:50400;24:105700;32:201775;35:256225;37:640600"
+            ),
+            std_mfj=v("std_deduction_mfj", 32200),
+            std_single=v("std_deduction_single", 16100),
+            ctc=v("child_tax_credit", 2200),
+            ctc_refundable=v("child_tax_credit_refundable", 1700),
+            feie=feie,
+            housing_base=v("foreign_housing_base_amount", 0.16 * feie),
             housing_limit=v("foreign_housing_limit_default", 0.30 * feie),
-            fica_rate=v("fica_employee_rate", 7.65) / 100, ss_wage_base=v("ss_wage_base", 184500))
+            fica_rate=v("fica_employee_rate", 7.65) / 100,
+            ss_wage_base=v("ss_wage_base", 184500),
+        )
 
     # ------------------------------------------------------------ country
     @lru_cache(maxsize=128)
@@ -145,12 +178,26 @@ class DataStore:
         year (local currency/year): the budget is scaled to the simulated couple's income
         relative to this (spending rises less than one-for-one with income)."""
         fixed = {  # (value, year, source, quality)
-            "USA": (104117, 2023, "BLS CE 2023: income after taxes, married couple only "
-                    "(CXUINCAFTTXLB0603M)", "A"),
-            "CAN": (110000, 2023, "ESTIMATE: Canadian Income Survey after-tax income of "
-                    "couples without children (mean, ~1.15x the median)", "C"),
-            "GBR": (52000, 2024, "ESTIMATE: ONS Family Spending / HBAI mean disposable income "
-                    "of non-retired two-adult households", "C"),
+            "USA": (
+                104117,
+                2023,
+                "BLS CE 2023: income after taxes, married couple only (CXUINCAFTTXLB0603M)",
+                "A",
+            ),
+            "CAN": (
+                110000,
+                2023,
+                "ESTIMATE: Canadian Income Survey after-tax income of "
+                "couples without children (mean, ~1.15x the median)",
+                "C",
+            ),
+            "GBR": (
+                52000,
+                2024,
+                "ESTIMATE: ONS Family Spending / HBAI mean disposable income "
+                "of non-retired two-adult households",
+                "C",
+            ),
         }
         proxy = {"CHE": "AUT", "LIE": "AUT", "ISL": "NOR"}
         b = self.budget[self.budget["iso3"] == iso3]
@@ -158,31 +205,46 @@ class DataStore:
         cpi = cd.cpi
         if iso3 in fixed:
             v, y, src, q = fixed[iso3]
-            f = cpi.get(price_year, cpi.get(max(cpi), 1)) / cpi.get(y, 1) if cpi and y in cpi \
+            f = (
+                cpi.get(price_year, cpi.get(max(cpi), 1)) / cpi.get(y, 1)
+                if cpi and y in cpi
                 else 1.0
-            return Sourced(v * f, f"{cd.currency}/year", src, y, q == "C", q,
-                           f"rolled to {price_year} prices with CPI")
+            )
+            return Sourced(
+                v * f,
+                f"{cd.currency}/year",
+                src,
+                y,
+                q == "C",
+                q,
+                f"rolled to {price_year} prices with CPI",
+            )
         src_iso = proxy.get(iso3, iso3)
         sb = self.budget[self.budget["iso3"] == src_iso]
         if sb.empty:
             return None
         survey = int(str(sb["survey_year"].iloc[0])[:4])
-        l = self.life[(self.life["iso3"] == src_iso) &
-                      (self.life["item"] == "silc_median_equivalised_A2_lt65")]
+        l = self.life[
+            (self.life["iso3"] == src_iso)
+            & (self.life["item"] == "silc_median_equivalised_A2_lt65")
+        ]
         if l.empty:
             return None
         l = l.assign(y=pd.to_numeric(l["year"], errors="coerce"))
         r = l.iloc[(l["y"] - (survey + 1)).abs().argsort().iloc[0]]
         y = int(r["y"])
         cpi_s = self._cpi(src_iso)
-        roll = cpi_s.get(price_year, cpi_s.get(max(cpi_s), 1)) / cpi_s.get(y - 1, 1) \
-            if cpi_s else 1.0
+        roll = (
+            cpi_s.get(price_year, cpi_s.get(max(cpi_s), 1)) / cpi_s.get(y - 1, 1) if cpi_s else 1.0
+        )
         v = float(r["value"]) * 1.5 * 1.12 * roll
-        legacy = {"HRV": (2023, 7.5345)}          # NAC before the euro changeover
+        legacy = {"HRV": (2023, 7.5345)}  # NAC before the euro changeover
         if src_iso in legacy and y < legacy[src_iso][0]:
             v /= legacy[src_iso][1]
-        note = (f"SILC {y} median equivalised net income of two adults <65 (income year {y-1})"
-                f" x1.5 (couple) x1.12 (mean/median), x{roll:.3f} CPI to {price_year}")
+        note = (
+            f"SILC {y} median equivalised net income of two adults <65 (income year {y - 1})"
+            f" x1.5 (couple) x1.12 (mean/median), x{roll:.3f} CPI to {price_year}"
+        )
         if src_iso != iso3:  # proxy budget: same conversion as the budget itself
             ppp_s, _ = self.fx_latest(src_iso, "lcu_per_intl_dollar")
             ppp, _ = self.fx_latest(iso3, "lcu_per_intl_dollar")
@@ -191,63 +253,89 @@ class DataStore:
             if ppp_s and ppp:
                 v *= ppp / ppp_s
                 note += f"; proxy budget ({src_iso}) converted at PPP"
-        return Sourced(v, f"{cd.currency}/year", "Eurostat EU-SILC ilc_di04", y, True, "B",
-                       note)
+        return Sourced(v, f"{cd.currency}/year", "Eurostat EU-SILC ilc_di04", y, True, "B", note)
 
     def _apply_params(self, cd: CountryData) -> CountryData:
         from dataclasses import replace
+
         iso3 = cd.iso3
         hh, lend = P.household(iso3), P.lending(iso3)
         notes = list(cd.notes)
-        upd: dict = {"hh": hh, "lend": lend, "cpi": self._cpi("CHE" if iso3 == "LIE"
-                                                              else iso3)}
+        upd: dict = {"hh": hh, "lend": lend, "cpi": self._cpi("CHE" if iso3 == "LIE" else iso3)}
         cd = replace(cd, cpi=upd["cpi"])
         rent = self._index_level(iso3, "rent", P.housing_item(iso3, "rent_new_lease"))
         if rent is not None:
-            upd["rent"] = rent.with_value(rent.value, note=(
-                "NEW-lease market rent (~70 m2, 2 bedrooms, excl. utilities). Previous "
-                f"default (all sitting tenants, EU-SILC): {cd.rent.value:,.0f}"))
+            upd["rent"] = rent.with_value(
+                rent.value,
+                note=(
+                    "NEW-lease market rent (~70 m2, 2 bedrooms, excl. utilities). Previous "
+                    f"default (all sitting tenants, EU-SILC): {cd.rent.value:,.0f}"
+                ),
+            )
         hp = P.housing_item(iso3, "home_price")
         if hp is None:
             m2 = P.housing_item(iso3, "home_price_m2")
             size = P.housing_item(iso3, "home_m2")
             if m2 is not None:
-                hp = m2.with_value(m2.value * size.value, unit=cd.currency,
-                                   note=f"{m2.value:,.0f}/m2 x {size.value:.0f} m2 "
-                                   "(existing family flat)")
+                hp = m2.with_value(
+                    m2.value * size.value,
+                    unit=cd.currency,
+                    note=f"{m2.value:,.0f}/m2 x {size.value:.0f} m2 (existing family flat)",
+                )
         if hp is not None:
             upd["home_price"] = self._index_level(iso3, "home_price", hp)
         if lend:
             src = str(lend.get("source", ""))
             q = str(lend.get("quality", "B"))
-            upd["down_payment_pct"] = Sourced(lend["down_pct"], "%", src, "2026", q == "C", q,
-                                              "minimum down payment for a first home; "
-                                              f"{lend['down_pct_young']:g}% up to age "
-                                              f"{lend['young_max_age']:g}"
-                                              if lend.get("young_max_age") else "")
-            upd["transfer_tax_pct"] = Sourced(lend["transfer_pct"], "%", src, "2026",
-                                              q == "C", q)
+            upd["down_payment_pct"] = Sourced(
+                lend["down_pct"],
+                "%",
+                src,
+                "2026",
+                q == "C",
+                q,
+                "minimum down payment for a first home; "
+                f"{lend['down_pct_young']:g}% up to age "
+                f"{lend['young_max_age']:g}"
+                if lend.get("young_max_age")
+                else "",
+            )
+            upd["transfer_tax_pct"] = Sourced(lend["transfer_pct"], "%", src, "2026", q == "C", q)
         w = P.household_sourced(iso3, "wedding_cost", cd.currency)
         if w is not None:
             upd["wedding_cost"] = w
         cc = hh.get("childcare_override", float("nan"))
         if cc == cc:
-            upd["childcare_per_child"] = Sourced(cc, f"{cd.currency}/year per child",
-                                                 P._hh_sources()["childcare_override"][0],
-                                                 "2025", True, "C",
-                                                 f"OECD TaxBEN value was "
-                                                 f"{cd.childcare_per_child.value:,.0f}")
+            upd["childcare_per_child"] = Sourced(
+                cc,
+                f"{cd.currency}/year per child",
+                P._hh_sources()["childcare_override"][0],
+                "2025",
+                True,
+                "C",
+                f"OECD TaxBEN value was {cd.childcare_per_child.value:,.0f}",
+            )
         upd["emergency_expense_size"] = Sourced(
-            0.0, cd.currency, "stress test only: the survey budgets already include "
-            "irregular costs (repairs, dental, replacements)", None, False, "",
+            0.0,
+            cd.currency,
+            "stress test only: the survey budgets already include "
+            "irregular costs (repairs, dental, replacements)",
+            None,
+            False,
+            "",
             f"size of one unexpected expense (EU-SILC/Fed SHED): "
-            f"{cd.emergency_expense_size.value:,.0f}")
+            f"{cd.emergency_expense_size.value:,.0f}",
+        )
         rwg = hh.get("real_wage_growth", float("nan"))
         if rwg == rwg:
             upd["real_wage_growth_hist"] = cd.real_wage_growth_hist.with_value(
-                rwg, source=P._hh_sources()["real_wage_growth"][0], estimated=True,
-                quality="C", note=f"history: {cd.real_wage_growth_hist.value:.2f}%/yr "
-                f"({cd.real_wage_growth_hist.source})")
+                rwg,
+                source=P._hh_sources()["real_wage_growth"][0],
+                estimated=True,
+                quality="C",
+                note=f"history: {cd.real_wage_growth_hist.value:.2f}%/yr "
+                f"({cd.real_wage_growth_hist.source})",
+            )
         snap = self.snap[self.snap["iso3"] == iso3] if not self.snap.empty else self.snap
         if not snap.empty and "youth_unempl" in snap:
             upd["unemp_youth"] = float(snap["youth_unempl"].iloc[0])
@@ -263,28 +351,32 @@ class DataStore:
                 hh["fuel_price"] = fp.value * float(self._cpi_ratio(iso3, int(fp.year)))
         upd["hh"] = hh
         if lend and not self.mort_lr.empty:
-            r = self.mort_lr[(self.mort_lr["iso3"] == ("CHE" if iso3 == "LIE" else iso3)) &
-                             (self.mort_lr["years"] >= 15)]
+            r = self.mort_lr[
+                (self.mort_lr["iso3"] == ("CHE" if iso3 == "LIE" else iso3))
+                & (self.mort_lr["years"] >= 15)
+            ]
             if not r.empty:
                 lend = dict(lend)
                 lend["rate_longrun"] = float(r["rate_longrun"].iloc[0])
-                lend["rate_longrun_source"] = (f"{r['source'].iloc[0]}, mean {r['from'].iloc[0]}-"
-                                               f"{r['to'].iloc[0]}")
+                lend["rate_longrun_source"] = (
+                    f"{r['source'].iloc[0]}, mean {r['from'].iloc[0]}-{r['to'].iloc[0]}"
+                )
                 upd["lend"] = lend
         upd["notes"] = notes
         cd = replace(cd, **upd)
         cd = replace(cd, budget_ref_income=self._budget_ref_income(iso3, cd))
         cd = replace(cd, budget_ref_housing=self._budget_ref_housing(iso3, cd))
         if cd.career is None and not self.us_career.empty:
-            from .career import from_country
-            pt = self.part_time[self.part_time["iso3"] == ("CHE" if iso3 == "LIE" else iso3)] \
-                if not self.part_time.empty else self.part_time
+            pt = (
+                self.part_time[self.part_time["iso3"] == ("CHE" if iso3 == "LIE" else iso3)]
+                if not self.part_time.empty
+                else self.part_time
+            )
             cd = replace(cd, career=from_country(cd, self._us_career(), pt, self.part_time))
         return cd
 
     def _us_career(self):
         if not hasattr(self, "_usc"):
-            from .career import CareerData
             self._usc = CareerData.from_table(self.us_career)
         return self._usc
 
@@ -293,8 +385,12 @@ class DataStore:
         L = self.labour
         if L.empty:
             return L
-        return L[(L["iso3"] == iso3) & (L["indicator"] == indicator) & (L["age_band"] == band)
-                 & (L["education"] == edu)].sort_values("year")
+        return L[
+            (L["iso3"] == iso3)
+            & (L["indicator"] == indicator)
+            & (L["age_band"] == band)
+            & (L["education"] == edu)
+        ].sort_values("year")
 
     def _cpi_ratio(self, iso3: str, year: int) -> float:
         """CPI(2025) / CPI(year): curated household prices are 2025 money and the engine
@@ -307,8 +403,10 @@ class DataStore:
         rent index), instead of rolling it with general CPI."""
         if s is None or self.market.empty:
             return s
-        m = self.market[(self.market["iso3"] == ("CHE" if iso3 == "LIE" else iso3)) &
-                        (self.market["index"] == index)].set_index("year")
+        m = self.market[
+            (self.market["iso3"] == ("CHE" if iso3 == "LIE" else iso3))
+            & (self.market["index"] == index)
+        ].set_index("year")
         try:
             y0 = int(str(s.year)[:4])
         except (TypeError, ValueError):
@@ -318,9 +416,14 @@ class DataStore:
         y1 = int(m.index.max())
         f = float(m.loc[y1, "value"] / m.loc[y0, "value"])
         part = " so far" if bool(m.loc[y1, "estimated"]) else ""
-        return s.with_value(s.value * f, year=str(y1), note=(
-            (s.note + "; " if s.note else "") + f"{s.value:,.0f} in {y0} x{f:.3f} "
-            f"({index.replace('_', ' ')} index {y0} -> {y1}{part}, {m.loc[y1, 'source']})"))
+        return s.with_value(
+            s.value * f,
+            year=str(y1),
+            note=(
+                (s.note + "; " if s.note else "") + f"{s.value:,.0f} in {y0} x{f:.3f} "
+                f"({index.replace('_', ' ')} index {y0} -> {y1}{part}, {m.loc[y1, 'source']})"
+            ),
+        )
 
     def us_states(self) -> pd.DataFrame:
         """Curated state table with the ACS / BEA columns replaced by the pipeline's latest
@@ -335,45 +438,67 @@ class DataStore:
             nm = "United States" if code == "US" else S.loc[code, "name"]
             if nm not in A.index:
                 continue
-            for col in ("rent_recent_gross", "rent_median_gross", "home_value", "re_taxes",
-                        "earn_ft_male", "earn_ft_female", "hh_income", "rpp"):
+            for col in (
+                "rent_recent_gross",
+                "rent_median_gross",
+                "home_value",
+                "re_taxes",
+                "earn_ft_male",
+                "earn_ft_female",
+                "hh_income",
+                "rpp",
+            ):
                 if col in A.columns and A.loc[nm, col] == A.loc[nm, col]:
                     S.loc[code, col] = float(A.loc[nm, col])
         S.attrs["acs_year"] = int(A["acs_year"].max()) if "acs_year" in A else None
         return S
 
     def _family(self, iso3: str) -> dict:
-        out: dict = {"family_earn": {}, "family_emp": {}, "family_src": None,
-                     "leave_home_age": None, "budget_coverage": {},
-                     "budget_coverage_measured": False}
+        out: dict = {
+            "family_earn": {},
+            "family_emp": {},
+            "family_src": None,
+            "leave_home_age": None,
+            "budget_coverage": {},
+        }
         F = self.family
         if not F.empty:
             f = F[F["iso3"] == iso3]
-            for item, key in (("earnings_factor", "family_earn"),
-                              ("employment_ratio", "family_emp")):
-                out[key] = {(str(r.n_children), str(r.youngest), str(r.education)):
-                            float(r.value) for r in f[f["item"] == item].itertuples()}
+            for item, key in (
+                ("earnings_factor", "family_earn"),
+                ("employment_ratio", "family_emp"),
+            ):
+                out[key] = {
+                    (str(r.n_children), str(r.youngest), str(r.education)): float(r.value)
+                    for r in f[f["item"] == item].itertuples()
+                }
             e = f[f["item"] == "earnings_factor"]
             if not e.empty:
-                out["family_src"] = Sourced(float("nan"), "x pay", str(e["source"].iloc[0]),
-                                            int(e["year"].max()), True, "B",
-                                            "employment rate x usual hours of women 25-49 "
-                                            "with children vs without")
+                out["family_src"] = Sourced(
+                    float("nan"),
+                    "x pay",
+                    str(e["source"].iloc[0]),
+                    int(e["year"].max()),
+                    True,
+                    "B",
+                    "employment rate x usual hours of women 25-49 with children vs without",
+                )
             lh = f[f["item"] == "age_leave_home"]
             if not lh.empty:
                 r = lh.iloc[0]
-                out["leave_home_age"] = Sourced(float(r["value"]), "years", str(r["source"]),
-                                                int(r["year"]), bool(r["estimated"]), "A",
-                                                "" if _nan(r["method"]) else str(r["method"]))
+                out["leave_home_age"] = Sourced(
+                    float(r["value"]),
+                    "years",
+                    str(r["source"]),
+                    int(r["year"]),
+                    bool(r["estimated"]),
+                    "A",
+                    "" if _nan(r["method"]) else str(r["method"]),
+                )
         C = self.coverage
         if not C.empty:
             mine = C[C["iso3"] == iso3]
             out["budget_coverage"] = {r.category: float(r.ratio) for r in mine.itertuples()}
-            # the default add-back is for the US only: European spending was calibrated on
-            # Eurostat saving rates by age with raw survey spending; the US Consumer
-            # Expenditure Survey implies married couples save a third of their income
-            out["budget_coverage_measured"] = iso3 == "USA" and bool(
-                (~mine["estimated"].astype(bool)).any()) if "estimated" in mine else False
         return out
 
     def _pension_rows(self, iso3: str) -> pd.DataFrame:
@@ -408,15 +533,24 @@ class DataStore:
             it = pr.set_index("item")
             if "retirement_age" in it.index:
                 x = it.loc["retirement_age"]
-                now = it.loc["retirement_age_now", "value"] if "retirement_age_now" in \
-                    it.index else None
+                now = (
+                    it.loc["retirement_age_now", "value"]
+                    if "retirement_age_now" in it.index
+                    else None
+                )
                 out["retirement_age"] = Sourced(
-                    float(x["value"]), "age", "OECD Pensions at a Glance: normal retirement "
+                    float(x["value"]),
+                    "age",
+                    "OECD Pensions at a Glance: normal retirement "
                     "age for someone who entered the labour market at 22 in "
-                    f"{int(x['year'])}", int(x["year"]), False, "A",
+                    f"{int(x['year'])}",
+                    int(x["year"]),
+                    False,
+                    "A",
                     (f"today's retirees: {now:g}; " if now is not None else "")
                     + "legislated increases (incl. links to life expectancy) applied; men "
-                    "and women averaged" + ("; Swiss rules used" if iso3 == "LIE" else ""))
+                    "and women averaged" + ("; Swiss rules used" if iso3 == "LIE" else ""),
+                )
             le = {}
             for item, v in it["value"].items():
                 if str(item).startswith("le65_"):
@@ -424,16 +558,14 @@ class DataStore:
                     yr = int(it.loc[item, "year"])
                     le[(sex, yr)] = float(v)
             out["le65"] = le
-            nrr = {lvl: float(it.loc[k, "value"]) for lvl, k in
-                   ((0.5, "nrr50"), (1.0, "nrr100"), (2.0, "nrr200")) if k in it.index}
+            nrr = {
+                lvl: float(it.loc[k, "value"])
+                for lvl, k in ((0.5, "nrr50"), (1.0, "nrr100"), (2.0, "nrr200"))
+                if k in it.index
+            }
             if nrr:
                 yr = int(it.loc["nrr100", "year"]) if "nrr100" in it.index else None
                 out["pension_nrr"] = nrr
-                out["pension_src"] = Sourced(
-                    nrr.get(1.0, float("nan")), "% of net earnings",
-                    "OECD Pensions at a Glance: net replacement rate, mandatory schemes, "
-                    "full career from 22 under legislated rules", yr, False, "A",
-                    " / ".join(f"{k:g}x AW {v:.0f}%" for k, v in sorted(nrr.items())))
         if not self.rates.empty:
             r = self.rates[self.rates["iso3"] == iso3]
             if not r.empty:
@@ -443,44 +575,69 @@ class DataStore:
             if not u.empty:
                 u = u.iloc[0]
                 out["university_cost"] = Sourced(
-                    float(u["per_student_year"]), f"{cd.currency}/year",
-                    "OECD Education at a Glance: " + ("household" if u["basis"] ==
-                                                     "households" else "private (households"
-                                                     " + firms)") + " payments to tertiary "
-                    "institutions per full-time student", int(u["year"]),
-                    bool(u["estimated"]), "B", "average over all students incl. those "
-                    "paying nothing; living costs are separate (children at home)")
+                    float(u["per_student_year"]),
+                    f"{cd.currency}/year",
+                    "OECD Education at a Glance: "
+                    + (
+                        "household"
+                        if u["basis"] == "households"
+                        else "private (households + firms)"
+                    )
+                    + " payments to tertiary "
+                    "institutions per full-time student",
+                    int(u["year"]),
+                    bool(u["estimated"]),
+                    "B",
+                    "average over all students incl. those "
+                    "paying nothing; living costs are separate (children at home)",
+                )
         out["student_debt"] = {
-            e: Sourced(float(v["amount"]), cd.currency, str(v["source"]), int(v["year"]),
-                       False, "B", str(v.get("note", "")))
-            for e, v in P.student_debt(iso3).items()}
+            e: Sourced(
+                float(v["amount"]),
+                cd.currency,
+                str(v["source"]),
+                int(v["year"]),
+                False,
+                "B",
+                str(v.get("note", "")),
+            )
+            for e, v in P.student_debt(iso3).items()
+        }
         if not self.portfolio.empty:
             pf = self.portfolio[self.portfolio["iso3"] == iso3]
             if not pf.empty:
-                out["portfolio"] = {k: v for k, v in pf.iloc[0].to_dict().items()
-                                    if not _nan(v)}
+                out["portfolio"] = {k: v for k, v in pf.iloc[0].to_dict().items() if not _nan(v)}
         if iso3 == "USA" and not self.us_career.empty:
             out["career"] = self._us_career()
         if not self.price_outlook.empty:
-            po = self.price_outlook[self.price_outlook["iso3"] ==
-                                    ("CHE" if iso3 == "LIE" else iso3)]
-            out["price_trends"] = {str(r.item)[4:]: (float(r.value), str(r.period),
-                                                    str(r.source))
-                                   for r in po.itertuples() if str(r.item).startswith("rel:")}
-            out["inflation_outlook"] = {str(r.item): (float(r.value), str(r.period),
-                                                     str(r.source))
-                                        for r in po.itertuples()
-                                        if str(r.item).startswith(("inflation_", "hci_",
-                                                                   "cpi_"))}
+            po = self.price_outlook[
+                self.price_outlook["iso3"] == ("CHE" if iso3 == "LIE" else iso3)
+            ]
+            out["price_trends"] = {
+                str(r.item)[4:]: (float(r.value), str(r.period), str(r.source))
+                for r in po.itertuples()
+                if str(r.item).startswith("rel:")
+            }
+            out["inflation_outlook"] = {
+                str(r.item): (float(r.value), str(r.period), str(r.source))
+                for r in po.itertuples()
+                if str(r.item).startswith(("inflation_", "hci_", "cpi_"))
+            }
         if not self.spending_lvl.empty:
             r = self.spending_lvl[self.spending_lvl["iso3"] == iso3]
             if not r.empty:
                 out["spending_level"] = Sourced(
-                    float(r["spending_level"].iloc[0]), "x", str(r["source"].iloc[0]),
-                    None, True, "B",
+                    float(r["spending_level"].iloc[0]),
+                    "x",
+                    str(r["source"].iloc[0]),
+                    None,
+                    True,
+                    "B",
                     f"the population then saves {r['saving_model'].iloc[0]:.1f}% "
                     f"(national accounts: {r['saving_national'].iloc[0]:.1f}%)"
-                    if "saving_model" in r and r["saving_model"].notna().iloc[0] else "")
+                    if "saving_model" in r and r["saving_model"].notna().iloc[0]
+                    else "",
+                )
         coh = self._cohort(iso3)
         if coh is not None:
             out["cohort"] = coh
@@ -496,7 +653,6 @@ class DataStore:
         US surveys (CPS ASEC every year, SCF every 3 years) and, for Europe's LFS, pooled
         over all European countries. SES earnings (every 4 years, 10-year bands) cannot
         measure it themselves and use the US estimate for earnings."""
-        from .cohort import CohortData, fit_all
         c = self.cohort
         if c.empty:
             return None
@@ -513,30 +669,45 @@ class DataStore:
         fits = dict(self._cohort_fits["eu"])
         borrow = {}
         if "earn_ftyr" in self._cohort_fits["us"]:
-            borrow["earn_ses"] = ("estimated on US CPS ASEC full-time pay: SES waves are "
-                                  "too few and too coarse to measure it",
-                                  self._cohort_fits["us"]["earn_ftyr"])
+            borrow["earn_ses"] = (
+                "estimated on US CPS ASEC full-time pay: SES waves are "
+                "too few and too coarse to measure it",
+                self._cohort_fits["us"]["earn_ftyr"],
+            )
         return CohortData.from_table(t, fits=fits, borrow=borrow)
 
     def _trend_wage(self, iso3: str, years: int = 20) -> Optional[Sourced]:
-        r = self.rwh[(self.rwh["iso3"] == iso3) & (self.rwh["measure"] == "avg_wage")] \
-            if not self.rwh.empty else self.rwh
+        r = (
+            self.rwh[(self.rwh["iso3"] == iso3) & (self.rwh["measure"] == "avg_wage")]
+            if not self.rwh.empty
+            else self.rwh
+        )
         if r.empty:
             return None
-        src = "OECD average wages" if (r["source"] == "OECD average wages").any() else \
-            r["source"].iloc[0]
+        src = (
+            "OECD average wages"
+            if (r["source"] == "OECD average wages").any()
+            else r["source"].iloc[0]
+        )
         s = r[r["source"] == src].groupby("year")["real_local"].mean().dropna()
         s = s[s.index >= s.index.max() - years]
         if len(s) < 10:
             return None
         n = s.index.max() - s.index.min()
         g = ((s.iloc[-1] / s.iloc[0]) ** (1 / n) - 1) * 100
-        return Sourced(round(float(g), 2), "%/yr", f"{src} (real, CPI-deflated)",
-                       f"{int(s.index.min())}-{int(s.index.max())}", False, "A",
-                       f"average real growth of the mean wage over {n} years")
+        return Sourced(
+            round(float(g), 2),
+            "%/yr",
+            f"{src} (real, CPI-deflated)",
+            f"{int(s.index.min())}-{int(s.index.max())}",
+            False,
+            "A",
+            f"average real growth of the mean wage over {n} years",
+        )
 
-    def _trend_index(self, iso3: str, index: str, cd: CountryData,
-                     years: int = 20) -> Optional[Sourced]:
+    def _trend_index(
+        self, iso3: str, index: str, cd: CountryData, years: int = 20
+    ) -> Optional[Sourced]:
         m = self.market
         if m.empty or not cd.cpi:
             return None
@@ -555,32 +726,54 @@ class DataStore:
         real = s / pd.Series({y: cd.cpi[y] for y in s.index})
         n = int(real.index.max() - real.index.min())
         g = ((real.iloc[-1] / real.iloc[0]) ** (1 / n) - 1) * 100
-        return Sourced(round(float(g), 2), "%/yr", f"{src} (real, CPI-deflated)",
-                       f"{int(real.index.min())}-{int(real.index.max())}", False, "A",
-                       f"average real growth over {n} years")
+        return Sourced(
+            round(float(g), 2),
+            "%/yr",
+            f"{src} (real, CPI-deflated)",
+            f"{int(real.index.min())}-{int(real.index.max())}",
+            False,
+            "A",
+            f"average real growth over {n} years",
+        )
 
     def _labour(self, iso3: str) -> dict:
         out: dict = {"labour": {}, "edu_pay": {}, "edu_pay_src": None}
         L = self.labour
         if not L.empty:
-            last = L[L["iso3"] == iso3].sort_values("year").groupby(
-                ["indicator", "age_band", "education"]).tail(1)
+            last = (
+                L[L["iso3"] == iso3]
+                .sort_values("year")
+                .groupby(["indicator", "age_band", "education"])
+                .tail(1)
+            )
             for r in last.itertuples(index=False):
                 q = str(r.quality) if not _nan(r.quality) else ""
                 out["labour"][(r.indicator, r.age_band, r.education)] = Sourced(
-                    float(r.value), str(r.unit), str(r.source), int(r.year),
-                    bool(r.estimated), q, "" if _nan(r.method) else str(r.method))
+                    float(r.value),
+                    str(r.unit),
+                    str(r.source),
+                    int(r.year),
+                    bool(r.estimated),
+                    q,
+                    "" if _nan(r.method) else str(r.method),
+                )
         E = self.edu_pay
         if not E.empty:
             e = E[E["iso3"] == iso3]
-            out["edu_pay"] = {(r.education, r.age_band): float(r.factor)
-                              for r in e.itertuples(index=False)}
+            out["edu_pay"] = {
+                (r.education, r.age_band): float(r.factor) for r in e.itertuples(index=False)
+            }
             if not e.empty:
                 r = e.iloc[0]
                 out["edu_pay_src"] = Sourced(
-                    float("nan"), "x all-levels pay", str(r["source"]),
-                    None if _nan(r["year"]) else int(r["year"]), bool(e["estimated"].any()),
-                    "B", "" if _nan(r["method"]) else str(r["method"]))
+                    float("nan"),
+                    "x all-levels pay",
+                    str(r["source"]),
+                    None if _nan(r["year"]) else int(r["year"]),
+                    bool(e["estimated"].any()),
+                    "B",
+                    "" if _nan(r["method"]) else str(r["method"]),
+                )
         return out
 
     def _budget_ref_housing(self, iso3: str, cd: CountryData) -> Sourced | None:
@@ -594,15 +787,26 @@ class DataStore:
         price_year = int(str(b["price_year"].iloc[0])[:4])
         lines = b.groupby("category")["monthly_local"].sum()
         if iso3 in ("USA", "CAN", "GBR"):
-            v = float(lines.get("rent_actual", 0) + lines.get("owner_costs_mortgage_tax_maint", 0)
-                      + 0.5 * lines.get("other_items_incl_mortgage_interest", 0))
-            return Sourced(v, f"{cd.currency}/month", "survey shelter spending (rent + owner "
-                           "costs incl. mortgage interest)", price_year, True, "B")
+            v = float(
+                lines.get("rent_actual", 0)
+                + lines.get("owner_costs_mortgage_tax_maint", 0)
+                + 0.5 * lines.get("other_items_incl_mortgage_interest", 0)
+            )
+            return Sourced(
+                v,
+                f"{cd.currency}/month",
+                "survey shelter spending (rent + owner costs incl. mortgage interest)",
+                price_year,
+                True,
+                "B",
+            )
         proxy = {"CHE": "AUT", "LIE": "AUT", "ISL": "NOR"}
         src = proxy.get(iso3, iso3)
         sb = self.budget[self.budget["iso3"] == src]
         survey = int(str(sb["survey_year"].iloc[0])[:4])
-        l = self.life[(self.life["iso3"] == src) & (self.life["item"] == "silc_A2_mean_housing_cost")]
+        l = self.life[
+            (self.life["iso3"] == src) & (self.life["item"] == "silc_A2_mean_housing_cost")
+        ]
         if l.empty:
             return None
         l = l.assign(y=pd.to_numeric(l["year"], errors="coerce"))
@@ -617,35 +821,61 @@ class DataStore:
             if ppp_s and ppp:
                 v *= ppp / ppp_s
         util = sum(x.value for k, x in cd.budget.items() if k in UTILITY_CATS)
-        return Sourced(max(v - util, 0.0), f"{cd.currency}/month", "Eurostat EU-SILC ilc_mded03 "
-                       "(two adults, all tenures)", y, True, "B",
-                       f"{v:,.0f} incl. utilities minus {util:,.0f} utilities in the budget")
+        return Sourced(
+            max(v - util, 0.0),
+            f"{cd.currency}/month",
+            "Eurostat EU-SILC ilc_mded03 (two adults, all tenures)",
+            y,
+            True,
+            "B",
+            f"{v:,.0f} incl. utilities minus {util:,.0f} utilities in the budget",
+        )
 
     def _apply_state(self, cd: CountryData, state: str) -> CountryData:
         """US state: earnings, rents, home prices, prices, property tax and premiums."""
         from dataclasses import replace
+
         S = self.us_states()
         if state not in S.index:
             return cd
         s, us = S.loc[state], S.loc["US"]
         acs = S.attrs.get("acs_year") or 2025
-        earn_f = (s["earn_ft_male"] + s["earn_ft_female"]) / (us["earn_ft_male"] +
-                                                              us["earn_ft_female"])
-        price_f = (100 + 0.35 * (s["rpp"] - 100)) / 100   # non-housing price level
+        earn_f = (s["earn_ft_male"] + s["earn_ft_female"]) / (
+            us["earn_ft_male"] + us["earn_ft_female"]
+        )
+        price_f = (100 + 0.35 * (s["rpp"] - 100)) / 100  # non-housing price level
         earnings = {k: [(a, v * earn_f) for a, v in pts] for k, pts in cd.earnings.items()}
-        budget = {k: v.with_value(v.value * price_f, note=f"x{price_f:.3f} state prices "
-                                  f"(BEA RPP {s['rpp']:.1f}, non-rent share)")
-                  for k, v in cd.budget.items()}
-        util = 0.75 * cd.budget["utilities_phone"].value * price_f \
-            if "utilities_phone" in cd.budget else 200.0
-        rent = Sourced(max(s["rent_recent_gross"] - util, 0.5 * s["rent_recent_gross"]),
-                       "USD/month", f"Census ACS {acs} B25113: median gross rent, recent "
-                       "movers", str(acs), False, "A",
-                       f"gross {s['rent_recent_gross']:,.0f} minus utilities {util:,.0f}")
+        budget = {
+            k: v.with_value(
+                v.value * price_f,
+                note=f"x{price_f:.3f} state prices (BEA RPP {s['rpp']:.1f}, non-rent share)",
+            )
+            for k, v in cd.budget.items()
+        }
+        util = (
+            0.75 * cd.budget["utilities_phone"].value * price_f
+            if "utilities_phone" in cd.budget
+            else 200.0
+        )
+        rent = Sourced(
+            max(s["rent_recent_gross"] - util, 0.5 * s["rent_recent_gross"]),
+            "USD/month",
+            f"Census ACS {acs} B25113: median gross rent, recent movers",
+            str(acs),
+            False,
+            "A",
+            f"gross {s['rent_recent_gross']:,.0f} minus utilities {util:,.0f}",
+        )
         nar = cd.home_price.value / us["home_value"]
-        hp = Sourced(s["home_value"] * nar, "USD", f"Census ACS {acs} B25077 median home value "
-                     f"x {nar:.3f} (national median sale price / ACS national median)",
-                     cd.home_price.year, False, "B")
+        hp = Sourced(
+            s["home_value"] * nar,
+            "USD",
+            f"Census ACS {acs} B25077 median home value "
+            f"x {nar:.3f} (national median sale price / ACS national median)",
+            cd.home_price.year,
+            False,
+            "B",
+        )
         lend = dict(cd.lend)
         lend["property_tax_pct"] = round(100 * s["re_taxes"] / s["home_value"], 3)
         hh = dict(cd.hh)
@@ -659,217 +889,389 @@ class DataStore:
             hh["partner_leave_rr"] = s["pfl_rr"]
         cc = cd.childcare_per_child
         ccf = (s["rpp"] / 100) ** 1.5
-        st_tax = P.us_state_tax().loc[state].to_dict() if state in P.us_state_tax().index \
-            else None
-        notes = list(cd.notes) + [f"US state: {s['name']}. Earnings x{earn_f:.3f} (ACS {acs} "
-                                  "median full-time earnings vs US), prices x"
-                                  f"{price_f:.3f}, property tax {lend['property_tax_pct']:.2f}%"
-                                  " of value (ACS)."]
+        st_tax = P.us_state_tax().loc[state].to_dict() if state in P.us_state_tax().index else None
+        notes = list(cd.notes) + [
+            f"US state: {s['name']}. Earnings x{earn_f:.3f} (ACS {acs} "
+            "median full-time earnings vs US), prices x"
+            f"{price_f:.3f}, property tax {lend['property_tax_pct']:.2f}%"
+            " of value (ACS)."
+        ]
         # careers (CPS pay by situation and percentile) move with the state's earnings too
         car = cd.career
         if car is not None and car.earn:
-            car = replace(car, earn={k: {b_: {q: v * earn_f for q, v in qs.items()}
-                                         for b_, qs in bands.items()}
-                                     for k, bands in car.earn.items()})
-        return replace(cd, name=f"{cd.name} – {s['name']}", earnings=earnings, budget=budget,
-                       rent=rent, home_price=hp, lend=lend, hh=hh, notes=notes, state=state,
-                       career=car,
-                       state_tax=st_tax, state_info=s.to_dict(),
-                       childcare_per_child=cc.with_value(cc.value * ccf, note=(
-                           f"national x{ccf:.2f} (state price level^1.5: childcare is "
-                           "labour-intensive)")),
-                       budget_ref_income=cd.budget_ref_income.with_value(
-                           cd.budget_ref_income.value * earn_f)
-                       if cd.budget_ref_income else None)
+            car = replace(
+                car,
+                earn={
+                    k: {b_: {q: v * earn_f for q, v in qs.items()} for b_, qs in bands.items()}
+                    for k, bands in car.earn.items()
+                },
+            )
+        return replace(
+            cd,
+            name=f"{cd.name} – {s['name']}",
+            earnings=earnings,
+            budget=budget,
+            rent=rent,
+            home_price=hp,
+            lend=lend,
+            hh=hh,
+            notes=notes,
+            state=state,
+            career=car,
+            state_tax=st_tax,
+            childcare_per_child=cc.with_value(
+                cc.value * ccf,
+                note=(
+                    f"national x{ccf:.2f} (state price level^1.5: childcare is labour-intensive)"
+                ),
+            ),
+            budget_ref_income=cd.budget_ref_income.with_value(cd.budget_ref_income.value * earn_f)
+            if cd.budget_ref_income
+            else None,
+        )
 
     def _country(self, iso3: str) -> CountryData:
         notes: list[str] = []
-        name = COUNTRY_NAMES.get(iso3, iso3)
-        # -- earnings
-        e = self.earn[(self.earn["iso3"] == iso3) & self.earn["age_mid"].notna()]
-        narrow = e[e["age_width"] <= 15]
-        if narrow["age_band"].nunique() >= 3:
-            e = narrow
-        earnings = {}
-        for stat, g in e.groupby("statistic"):
-            pts = sorted((float(a), float(v)) for a, v in zip(g["age_mid"], g["annual_gross_local"]))
-            earnings[stat] = pts
-        currency = str(e["currency"].iloc[0]) if not e.empty else "EUR"
-        est = bool(e["estimated"].any()) if not e.empty else True
-        earnings_src = Sourced(float("nan"), f"{currency}/year", str(e["source"].iloc[0])
-                               if not e.empty else "", int(e["year"].max()) if not e.empty else None,
-                               est, "B" if est else "A",
-                               "; ".join(sorted(set(e["method"].dropna().astype(str))))[:300])
-        # -- tax
-        t = self.taxc[self.taxc["iso3"] == iso3].sort_values("aw_multiple")
-        pts = [TaxPoint(r.aw_multiple, r.income_tax_rate, r.employee_ssc_rate)
-               for r in t.itertuples()]
-        aw = float(t["avg_wage_local"].iloc[0]) if not t.empty else float("nan")
-        tyear = int(t["year"].max()) if not t.empty else None
-        tax_src = Sourced(float("nan"), "", str(t["source"].iloc[0]) if not t.empty else "",
-                          tyear, bool(t["estimated"].any()) if not t.empty else True,
-                          str(t["quality"].iloc[0]) if not t.empty else "C")
-        mtr = t["marginal_rate_top"].dropna()
-        kid = t["child_net_benefit_per_child_frac_aw"].dropna()
-        child_ben = Sourced(float(kid.iloc[0]) * aw if not kid.empty else 0.0,
-                            f"{currency}/year per child",
-                            "OECD Taxing Wages: net income of couple (100%+67% AW) with 2 "
-                            "children minus without, / 2" if not kid.empty else
-                            "not available (0)", tyear, kid.empty, "A" if not kid.empty else "C")
-        # -- budget
-        b = self.budget[(self.budget["iso3"] == iso3) & ~self.budget["category"].isin(TENURE)]
-        budget = {}
-        for cat, g in b.groupby("category"):
-            r = g.iloc[0]
-            budget[cat] = Sourced(float(g["monthly_local"].sum()), f"{currency}/month",
-                                  str(r["source"]), str(r["price_year"])[:7],
-                                  bool(g["estimated"].any()),
-                                  "C" if "ESTIMATE" in str(r["method"]) else "B",
-                                  str(r["method"])[:200])
-        if not budget:
-            notes.append("No household budget survey: budget is empty - enter one manually.")
-        util = sum(v.value for k, v in budget.items() if k in UTILITY_CATS)
-        if iso3 == "USA":
-            util += 0.75 * budget["utilities_phone"].value if "utilities_phone" in budget else 0
-        # -- rent (monthly, couple, EXCLUDING utilities: they are in the budget)
-        rent = None
-        for item, incl_util in (("average_private_rent", False),
-                                ("median_of_centres_avg_rent_2br", False),
-                                ("median_gross_rent", True),
-                                ("tenant_total_housing_cost", True)):
-            s = self.life_item(iso3, item)
-            if s is not None:
-                if incl_util and util:
-                    v = max(s.value - util, 0.5 * s.value)
-                    rent = s.with_value(v, estimated=True, note=(
-                        f"{s.note}; utilities in the budget ({util:,.0f}/month) subtracted"))
-                else:
-                    rent = s
-                break
-        if rent is None and iso3 == "LIE":
-            ch = self.country("CHE")
-            rent = ch.rent.with_value(ch.rent.value, estimated=True, quality="C",
-                                      source="ESTIMATE: Swiss rent used for Liechtenstein; "
-                                      + ch.rent.source)
-        if rent is None:
-            rent = Sourced(0.0, f"{currency}/month", "missing - enter rent", None, True, "C")
-            notes.append("No rent data: enter a monthly rent.")
-        rf1 = self.life_item(iso3, "rent_factor_one_child")
-        rf2 = self.life_item(iso3, "rent_factor_two_children")
-        rent_f = [rf1.value if rf1 else 1.15, rf2.value if rf2 else 1.30]
-        rent_f_src = rf1 or Sourced(1.15, "ratio", "assumption: +15% / +30% rent with 1 / 2 "
-                                    "children (bigger home)", None, True, "C")
-        # -- house
-        hp = self.life_item(iso3, "home_price") or Sourced(0.0, currency, "missing", None, True, "C")
-        if "Deloitte" in hp.source:
-            hp = hp.with_value(hp.value, note="NEW dwellings, city-weighted: a suburban resale "
-                               "home is usually cheaper - adjust. " + hp.note)
-        dp = self.life_item(iso3, "down_payment_pct") or Sourced(20.0, "%", "assumption", None,
-                                                                 True, "C")
-        tt = self.life_item(iso3, "transfer_tax_pct")
-        if tt is None:
-            tt = {"GBR": Sourced(0.0, "%", "Stamp duty: first-time-buyer relief (0% up to "
-                                 "GBP 300k, 5% to 500k) - England/NI", "2026", False, "B"),
-                  "USA": Sourced(0.5, "%", "assumption: state/local transfer taxes ~0-2%",
-                                 None, True, "C"),
-                  "CAN": Sourced(1.5, "%", "assumption: provincial land transfer tax "
-                                 "(~1-2%, Ontario/BC higher)", None, True, "C")}.get(
-                iso3, Sourced(2.0, "%", "assumption: no data (typical 1-4%)", None, True, "C"))
-        mr = self.life_item(iso3, "mortgage_rate") or Sourced(4.0, "%", "assumption: no data",
-                                                              None, True, "C")
-        wed = self.life_item(iso3, "average_cost") or Sourced(0.0, currency, "missing", None,
-                                                              True, "C")
-        if wed.source.startswith("derived"):
-            wed = wed.with_value(wed.value, estimated=True)
-        # -- children
-        cs = self.life_item(iso3, "extra_spending_per_child")
-        if cs is None:
-            tot = sum(v.value for v in budget.values())
-            cs = Sourced(0.15 * tot, f"{currency}/month", "assumption: +15% of the couple "
-                         "budget per child (no survey split)", None, True, "C")
-        cc = self._childcare(iso3, aw, currency, tyear)
-        # -- emergencies
-        es = self.life_item(iso3, "unexpected_expense_size") or Sourced(
-            0.0, currency, "missing", None, True, "C")
-        if es.unit.startswith("EUR") and currency != "EUR":
-            r_l, _ = self.fx_latest(iso3, "lcu_per_usd")
-            r_e, _ = self.fx_latest("EMU", "lcu_per_usd")
-            if r_l and r_e:
-                es = es.with_value(es.value * r_l / r_e, unit=currency)
+        f = self._earnings_fields(iso3)
+        cur = f["currency"]
+        f.update(self._tax_fields(iso3, cur))
+        f.update(self._budget_fields(iso3, cur, notes))
+        f.update(self._home_fields(iso3, cur))
+        f.update(self._family_fields(iso3, cur, f))
         if iso3 == "LIE":  # no own data: borrow Switzerland's (same currency, similar costs)
             ch = self.country("CHE")
 
             def swiss(s: Sourced, other: Sourced) -> Sourced:
                 if s.value or not other.value:
                     return s
-                return other.with_value(other.value, estimated=True, quality="C",
-                                        source="ESTIMATE: Swiss value used for Liechtenstein; "
-                                        + other.source)
-            hp, wed = swiss(hp, ch.home_price), swiss(wed, ch.wedding_cost)
-            cc, es = swiss(cc, ch.childcare_per_child), swiss(es, ch.emergency_expense_size)
-        nrr = self._nrr(iso3)
+                return other.with_value(
+                    other.value,
+                    estimated=True,
+                    quality="C",
+                    source="ESTIMATE: Swiss value used for Liechtenstein; " + other.source,
+                )
+
+            for k in (
+                "home_price",
+                "wedding_cost",
+                "childcare_per_child",
+                "emergency_expense_size",
+            ):
+                f[k] = swiss(f[k], getattr(ch, k))
+        f.update(self._economy_fields(iso3, cur))
+        if iso3 == "BGR":
+            notes.append(
+                "Bulgaria adopted the euro on 1 Jan 2026; amounts are in lev (BGN) "
+                "because all historical statistics are. 1 EUR = 1.95583 BGN."
+            )
+        tot_ref = self.ref(iso3, "us_totalization_agreement")
+        return CountryData(
+            iso3=iso3,
+            name=COUNTRY_NAMES.get(iso3, iso3),
+            totalization=bool(tot_ref is not None or iso3 == "USA"),
+            notes=notes,
+            **f,
+        )
+
+    def _earnings_fields(self, iso3: str) -> dict:
+        """Gross earnings by age (narrow age bands where there are enough) per statistic."""
+        e = self.earn[(self.earn["iso3"] == iso3) & self.earn["age_mid"].notna()]
+        narrow = e[e["age_width"] <= 15]
+        if narrow["age_band"].nunique() >= 3:
+            e = narrow
+        earnings = {}
+        for stat, g in e.groupby("statistic"):
+            pts = sorted(
+                (float(a), float(v)) for a, v in zip(g["age_mid"], g["annual_gross_local"])
+            )
+            earnings[stat] = pts
+        currency = str(e["currency"].iloc[0]) if not e.empty else "EUR"
+        est = bool(e["estimated"].any()) if not e.empty else True
+        earnings_src = Sourced(
+            float("nan"),
+            f"{currency}/year",
+            str(e["source"].iloc[0]) if not e.empty else "",
+            int(e["year"].max()) if not e.empty else None,
+            est,
+            "B" if est else "A",
+            "; ".join(sorted(set(e["method"].dropna().astype(str))))[:300],
+        )
+        return {"currency": currency, "earnings": earnings, "earnings_src": earnings_src}
+
+    def _tax_fields(self, iso3: str, currency: str) -> dict:
+        """Tax curve, average wage, top marginal rate and child benefits."""
+        t = self.taxc[self.taxc["iso3"] == iso3].sort_values("aw_multiple")
+        pts = [
+            TaxPoint(r.aw_multiple, r.income_tax_rate, r.employee_ssc_rate) for r in t.itertuples()
+        ]
+        aw = float(t["avg_wage_local"].iloc[0]) if not t.empty else float("nan")
+        tyear = int(t["year"].max()) if not t.empty else None
+        tax_src = Sourced(
+            float("nan"),
+            "",
+            str(t["source"].iloc[0]) if not t.empty else "",
+            tyear,
+            bool(t["estimated"].any()) if not t.empty else True,
+            str(t["quality"].iloc[0]) if not t.empty else "C",
+        )
+        mtr = t["marginal_rate_top"].dropna()
+        kid = t["child_net_benefit_per_child_frac_aw"].dropna()
+        child_ben = Sourced(
+            float(kid.iloc[0]) * aw if not kid.empty else 0.0,
+            f"{currency}/year per child",
+            "OECD Taxing Wages: net income of couple (100%+67% AW) with 2 "
+            "children minus without, / 2"
+            if not kid.empty
+            else "not available (0)",
+            tyear,
+            kid.empty,
+            "A" if not kid.empty else "C",
+        )
+        return {
+            "tax_points": pts,
+            "avg_wage": Sourced(aw, f"{currency}/year", tax_src.source, tyear),
+            "marginal_rate_top": float(mtr.iloc[0]) if not mtr.empty else None,
+            "tax_src": tax_src,
+            "child_benefit_per_child": child_ben,
+        }
+
+    def _budget_fields(self, iso3: str, currency: str, notes: list[str]) -> dict:
+        """The survey budget by category, and the rent (monthly, couple, EXCLUDING
+        utilities: they are in the budget) with how it rises with children."""
+        b = self.budget[(self.budget["iso3"] == iso3) & ~self.budget["category"].isin(TENURE)]
+        budget = {}
+        for cat, g in b.groupby("category"):
+            r = g.iloc[0]
+            budget[cat] = Sourced(
+                float(g["monthly_local"].sum()),
+                f"{currency}/month",
+                str(r["source"]),
+                str(r["price_year"])[:7],
+                bool(g["estimated"].any()),
+                "C" if "ESTIMATE" in str(r["method"]) else "B",
+                str(r["method"])[:200],
+            )
+        if not budget:
+            notes.append("No household budget survey: budget is empty - enter one manually.")
+        util = sum(v.value for k, v in budget.items() if k in UTILITY_CATS)
+        if iso3 == "USA":
+            util += 0.75 * budget["utilities_phone"].value if "utilities_phone" in budget else 0
+        rent = None
+        for item, incl_util in (
+            ("average_private_rent", False),
+            ("median_of_centres_avg_rent_2br", False),
+            ("median_gross_rent", True),
+            ("tenant_total_housing_cost", True),
+        ):
+            s = self.life_item(iso3, item)
+            if s is not None:
+                if incl_util and util:
+                    v = max(s.value - util, 0.5 * s.value)
+                    rent = s.with_value(
+                        v,
+                        estimated=True,
+                        note=(f"{s.note}; utilities in the budget ({util:,.0f}/month) subtracted"),
+                    )
+                else:
+                    rent = s
+                break
+        if rent is None and iso3 == "LIE":
+            ch = self.country("CHE")
+            rent = ch.rent.with_value(
+                ch.rent.value,
+                estimated=True,
+                quality="C",
+                source="ESTIMATE: Swiss rent used for Liechtenstein; " + ch.rent.source,
+            )
+        if rent is None:
+            rent = Sourced(0.0, f"{currency}/month", "missing - enter rent", None, True, "C")
+            notes.append("No rent data: enter a monthly rent.")
+        rf1 = self.life_item(iso3, "rent_factor_one_child")
+        rf2 = self.life_item(iso3, "rent_factor_two_children")
+        rent_f = [rf1.value if rf1 else 1.15, rf2.value if rf2 else 1.30]
+        rent_f_src = rf1 or Sourced(
+            1.15,
+            "ratio",
+            "assumption: +15% / +30% rent with 1 / 2 children (bigger home)",
+            None,
+            True,
+            "C",
+        )
+        return {
+            "budget": budget,
+            "rent": rent,
+            "rent_factor_per_child": rent_f,
+            "rent_factor_src": rent_f_src,
+        }
+
+    def _home_fields(self, iso3: str, currency: str) -> dict:
+        """Home price, down payment, transfer tax, mortgage rate - and the wedding."""
+        hp = self.life_item(iso3, "home_price") or Sourced(
+            0.0, currency, "missing", None, True, "C"
+        )
+        if "Deloitte" in hp.source:
+            hp = hp.with_value(
+                hp.value,
+                note="NEW dwellings, city-weighted: a suburban resale "
+                "home is usually cheaper - adjust. " + hp.note,
+            )
+        dp = self.life_item(iso3, "down_payment_pct") or Sourced(
+            20.0, "%", "assumption", None, True, "C"
+        )
+        tt = self.life_item(iso3, "transfer_tax_pct")
+        if tt is None:
+            tt = {
+                "GBR": Sourced(
+                    0.0,
+                    "%",
+                    "Stamp duty: first-time-buyer relief (0% up to "
+                    "GBP 300k, 5% to 500k) - England/NI",
+                    "2026",
+                    False,
+                    "B",
+                ),
+                "USA": Sourced(
+                    0.5, "%", "assumption: state/local transfer taxes ~0-2%", None, True, "C"
+                ),
+                "CAN": Sourced(
+                    1.5,
+                    "%",
+                    "assumption: provincial land transfer tax (~1-2%, Ontario/BC higher)",
+                    None,
+                    True,
+                    "C",
+                ),
+            }.get(iso3, Sourced(2.0, "%", "assumption: no data (typical 1-4%)", None, True, "C"))
+        mr = self.life_item(iso3, "mortgage_rate") or Sourced(
+            4.0, "%", "assumption: no data", None, True, "C"
+        )
+        wed = self.life_item(iso3, "average_cost") or Sourced(
+            0.0, currency, "missing", None, True, "C"
+        )
+        if wed.source.startswith("derived"):
+            wed = wed.with_value(wed.value, estimated=True)
+        return {
+            "home_price": hp,
+            "down_payment_pct": dp,
+            "transfer_tax_pct": tt,
+            "mortgage_rate": mr,
+            "wedding_cost": wed,
+        }
+
+    def _family_fields(self, iso3: str, currency: str, f: dict) -> dict:
+        """Children's extra spending, childcare, the size of an unexpected expense and
+        unemployment benefits."""
+        cs = self.life_item(iso3, "extra_spending_per_child")
+        if cs is None:
+            tot = sum(v.value for v in f["budget"].values())
+            cs = Sourced(
+                0.15 * tot,
+                f"{currency}/month",
+                "assumption: +15% of the couple budget per child (no survey split)",
+                None,
+                True,
+                "C",
+            )
+        cc = self._childcare(iso3, f["avg_wage"].value, currency, f["avg_wage"].year)
+        es = self.life_item(iso3, "unexpected_expense_size") or Sourced(
+            0.0, currency, "missing", None, True, "C"
+        )
+        if es.unit.startswith("EUR") and currency != "EUR":
+            r_l, _ = self.fx_latest(iso3, "lcu_per_usd")
+            r_e, _ = self.fx_latest("EMU", "lcu_per_usd")
+            if r_l and r_e:
+                es = es.with_value(es.value * r_l / r_e, unit=currency)
+        return {
+            "child_extra_spending": cs,
+            "childcare_per_child": cc,
+            "emergency_expense_size": es,
+            "nrr": self._nrr(iso3),
+        }
+
+    def _economy_fields(self, iso3: str, currency: str) -> dict:
+        """Unemployment, inflation and real wage history, exchange rates and PPPs."""
         un = self.context(iso3, "unemployment_rate")
-        unemp = Sourced(float(un["value"].iloc[-1]), "%", str(un["source"].iloc[-1]),
-                        int(un["year"].iloc[-1])) if not un.empty else Sourced(float("nan"))
+        unemp = (
+            Sourced(
+                float(un["value"].iloc[-1]),
+                "%",
+                str(un["source"].iloc[-1]),
+                int(un["year"].iloc[-1]),
+            )
+            if not un.empty
+            else Sourced(float("nan"))
+        )
         inf = self.context(iso3, "inflation_cpi")
         inf10 = inf[inf["year"] > inf["year"].max() - 10] if not inf.empty else inf
-        infl = Sourced(float(inf10["value"].mean()) if not inf10.empty else 2.0, "%/yr",
-                       "World Bank CPI, 10-year average", f"{int(inf10['year'].min())}-"
-                       f"{int(inf10['year'].max())}" if not inf10.empty else None)
-        rwg = self._real_wage_growth(iso3)
+        infl = Sourced(
+            float(inf10["value"].mean()) if not inf10.empty else 2.0,
+            "%/yr",
+            "World Bank CPI, 10-year average",
+            f"{int(inf10['year'].min())}-{int(inf10['year'].max())}" if not inf10.empty else None,
+        )
         fxv, fxy = self.fx_latest(iso3, "lcu_per_usd")
         pppv, pppy = self.fx_latest(iso3, "lcu_per_intl_dollar")
         if iso3 == "LIE":
             fxv, fxy = self.fx_latest("CHE", "lcu_per_usd")
             pppv, pppy = pppv or self.fx_latest("CHE", "lcu_per_intl_dollar")[0], pppy
-        if iso3 == "BGR":
-            notes.append("Bulgaria adopted the euro on 1 Jan 2026; amounts are in lev (BGN) "
-                         "because all historical statistics are. 1 EUR = 1.95583 BGN.")
-        tot_ref = self.ref(iso3, "us_totalization_agreement")
-        data_year = fxy or 2025
-        return CountryData(
-            iso3=iso3, name=name, currency=currency, data_year=data_year, earnings=earnings,
-            earnings_src=earnings_src, tax_points=pts,
-            avg_wage=Sourced(aw, f"{currency}/year", tax_src.source, tyear),
-            marginal_rate_top=float(mtr.iloc[0]) if not mtr.empty else None, tax_src=tax_src,
-            child_benefit_per_child=child_ben, budget=budget, rent=rent,
-            rent_factor_per_child=rent_f, rent_factor_src=rent_f_src, home_price=hp,
-            down_payment_pct=dp, transfer_tax_pct=tt, mortgage_rate=mr, wedding_cost=wed,
-            child_extra_spending=cs, childcare_per_child=cc, emergency_expense_size=es, nrr=nrr,
-            unemployment_rate=unemp, inflation_hist=infl, real_wage_growth_hist=rwg,
-            lcu_per_usd=Sourced(fxv or 1.0, f"{currency} per USD", "World Bank PA.NUS.FCRF", fxy),
-            lcu_per_intl=Sourced(pppv or (fxv or 1.0), f"{currency} per intl $",
-                                 "World Bank PA.NUS.PRVT.PP (private consumption PPP)", pppy),
-            totalization=bool(tot_ref is not None or iso3 == "USA"), notes=notes)
+        return {
+            "unemployment_rate": unemp,
+            "inflation_hist": infl,
+            "real_wage_growth_hist": self._real_wage_growth(iso3),
+            "data_year": fxy or 2025,
+            "lcu_per_usd": Sourced(
+                fxv or 1.0, f"{currency} per USD", "World Bank PA.NUS.FCRF", fxy
+            ),
+            "lcu_per_intl": Sourced(
+                pppv or (fxv or 1.0),
+                f"{currency} per intl $",
+                "World Bank PA.NUS.PRVT.PP (private consumption PPP)",
+                pppy,
+            ),
+        }
 
     def _childcare(self, iso3, aw, currency, year) -> Sourced:
         """OECD net childcare cost for a couple (100%+67% AW) with two children aged 2-3
         in full-time centre care, per child per year."""
-        l = self.life[(self.life["iso3"] == iso3) &
-                      self.life["item"].astype(str).str.startswith("childcare_net_cost")]
+        l = self.life[
+            (self.life["iso3"] == iso3)
+            & self.life["item"].astype(str).str.startswith("childcare_net_cost")
+        ]
         if l.empty:
-            return Sourced(0.0, f"{currency}/year", "missing - enter childcare cost", None,
-                           True, "C")
+            return Sourced(
+                0.0, f"{currency}/year", "missing - enter childcare cost", None, True, "C"
+            )
         # prefer an amount in national currency; else a % of AW / of net income
         for unit_rx, conv, how in (
-                (r"^XDC$|NAC|national currency", lambda v: v, "national currency"),
-                (r"PT_AW|average wage|_AW", lambda v: v / 100 * aw, "% of average wage x AW"),
-                (r"PT_INC_NET|net.*income|PT_NHI", lambda v: v / 100 * aw * 1.67 * 0.75,
-                 "% of net household income x approx. net income (1.67 AW x 0.75)")):
+            (r"^XDC$|NAC|national currency", lambda v: v, "national currency"),
+            (r"PT_AW|average wage|_AW", lambda v: v / 100 * aw, "% of average wage x AW"),
+            (
+                r"PT_INC_NET|net.*income|PT_NHI",
+                lambda v: v / 100 * aw * 1.67 * 0.75,
+                "% of net household income x approx. net income (1.67 AW x 0.75)",
+            ),
+        ):
             s = l[l["unit"].astype(str).str.contains(unit_rx, regex=True, case=False)]
             if not s.empty:  # OECD XDC values are ANNUAL, for both children
-                r = s.sort_values("value").iloc[len(s) // 2]   # median across variants
+                r = s.sort_values("value").iloc[len(s) // 2]  # median across variants
                 v = conv(float(r["value"]))
                 per_year = v * 12 if "month" in str(r["unit"]).lower() else v
-                return Sourced(per_year / 2, f"{currency}/year per child", "OECD TaxBEN net "
-                               "childcare cost (2 children, full-time centre care)",
-                               r["year"], how != "national currency", "A",
-                               f"{r['item']} [{r['unit']}] -> {how}; / 2 children")
+                return Sourced(
+                    per_year / 2,
+                    f"{currency}/year per child",
+                    "OECD TaxBEN net childcare cost (2 children, full-time centre care)",
+                    r["year"],
+                    how != "national currency",
+                    "A",
+                    f"{r['item']} [{r['unit']}] -> {how}; / 2 children",
+                )
         return Sourced(0.0, f"{currency}/year", "childcare unit not understood", None, True, "C")
 
     def _nrr(self, iso3) -> dict[int, Sourced]:
-        l = self.life[(self.life["iso3"] == iso3) &
-                      self.life["item"].astype(str).str.startswith("net_replacement_rate")]
+        l = self.life[
+            (self.life["iso3"] == iso3)
+            & self.life["item"].astype(str).str.startswith("net_replacement_rate")
+        ]
         out = {}
         for r in l.itertuples():
             m = re.search(r"_m(\d+) \((C_C0)[^)]*\)", str(r.item))
@@ -880,23 +1282,41 @@ class DataStore:
             # because the spouse's pay continues) if present, else whatever exists
             prev = out.get(months)
             if prev is None or "AW67" in str(r.item):
-                out[months] = Sourced(float(r.value), "% of net income", "OECD TaxBEN NRR",
-                                      r.year, False, "A", str(r.item))
+                out[months] = Sourced(
+                    float(r.value),
+                    "% of net income",
+                    "OECD TaxBEN NRR",
+                    r.year,
+                    False,
+                    "A",
+                    str(r.item),
+                )
         return out
 
     def _real_wage_growth(self, iso3) -> Sourced:
         if self.rwh.empty or "real_cagr_pct_last_10y" not in self.rwh:
             return Sourced(0.5, "%/yr", "assumption", None, True, "C")
         r = self.rwh[(self.rwh["iso3"] == iso3) & self.rwh["real_cagr_pct_last_10y"].notna()]
-        for meas, src in (("avg_wage", "OECD average wages"), ("avg_wage", None),
-                          ("earnings_by_age", None), ("household_income", None)):
+        for meas, src in (
+            ("avg_wage", "OECD average wages"),
+            ("avg_wage", None),
+            ("earnings_by_age", None),
+            ("household_income", None),
+        ):
             s = r[r["measure"] == meas]
             if src:
                 s = s[s["source"] == src]
             if not s.empty:
                 x = s.iloc[0]
-                return Sourced(float(x["real_cagr_pct_last_10y"]), "%/yr",
-                               f"{x['source']} ({x['measure']}, MEAN wage)" if meas == "avg_wage"
-                               else str(x["source"]), int(x["year"]), False, "A",
-                               "real CAGR over the last 10 years")
+                return Sourced(
+                    float(x["real_cagr_pct_last_10y"]),
+                    "%/yr",
+                    f"{x['source']} ({x['measure']}, MEAN wage)"
+                    if meas == "avg_wage"
+                    else str(x["source"]),
+                    int(x["year"]),
+                    False,
+                    "A",
+                    "real CAGR over the last 10 years",
+                )
         return Sourced(0.5, "%/yr", "assumption: no wage history", None, True, "C")

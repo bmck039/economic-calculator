@@ -13,6 +13,7 @@ Works on macOS, Linux and Windows with only the Python standard library.
 Add --no-test to skip the first-run tests. Settings live in config.env.
 (On Windows use `py run.py` if `python` isn't on PATH; on macOS/Linux `python3 run.py`.)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,10 +28,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "econ_data"
-REQUIRED_TABLES = ["earnings_profile", "tax_curve", "couple_budget", "life_events",
-                   "fx_ppp", "reference_values", "country_snapshot"]
-DEFAULTS = {"HOST": "localhost", "PORT": "8501", "BASE_URL_PATH": "", "OPEN_BROWSER": "true",
-            "VENV_DIR": ".venv", "RUN_TESTS": "first-run"}
+REQUIRED_TABLES = [
+    "earnings_profile",
+    "tax_curve",
+    "couple_budget",
+    "life_events",
+    "fx_ppp",
+    "reference_values",
+    "country_snapshot",
+]
+DEFAULTS = {
+    "HOST": "localhost",
+    "PORT": "8501",
+    "BASE_URL_PATH": "",
+    "OPEN_BROWSER": "true",
+    "VENV_DIR": ".venv",
+    "RUN_TESTS": "first-run",
+}
 WINDOWS = os.name == "nt"
 
 if WINDOWS:
@@ -90,7 +104,8 @@ def venv_python(venv: Path) -> Path:
 
 
 def python_env(cfg: dict[str, str]) -> Path:
-    """Return the interpreter to use: the active venv/conda env, else $VENV_DIR (created if needed)."""
+    """Return the interpreter to use: the active venv/conda env, else $VENV_DIR (created if
+    needed)."""
     if sys.prefix != sys.base_prefix:
         say(f"using the active virtualenv: {sys.prefix}")
         return Path(sys.executable)
@@ -124,36 +139,58 @@ def run(py: Path, *args: str, replace: bool = False) -> int:
 
 
 def prefix_of(py: Path) -> Path:
-    out = subprocess.run([str(py), "-c", "import sys; print(sys.prefix)"],
-                         capture_output=True, text=True, check=True)
+    out = subprocess.run(
+        [str(py), "-c", "import sys; print(sys.prefix)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     return Path(out.stdout.strip())
 
 
 # ------------------------------------------------------------------ steps
 def ensure_packages(py: Path, prefix: Path) -> bool:
-    """pip install only when requirements.txt or the interpreter changed. Returns True if it ran."""
+    """pip install only when requirements.txt or the interpreter changed. Returns True if it
+    ran."""
     stamp = prefix / ".econcalc-requirements"
     version = subprocess.run([str(py), "--version"], capture_output=True, text=True).stdout
     want = hashlib.sha256((ROOT / "requirements.txt").read_bytes() + version.encode()).hexdigest()
     if stamp.exists() and stamp.read_text().strip() == want:
         return False
     say("installing Python packages (requirements.txt)")
-    if run(py, "-m", "pip", "install", "--disable-pip-version-check", "-q",
-           "-r", "requirements.txt") != 0:
+    if (
+        run(
+            py,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "-q",
+            "-r",
+            "requirements.txt",
+        )
+        != 0
+    ):
         die("pip install failed (see above)")
     stamp.write_text(want)
     return True
 
 
 def missing_tables() -> list[str]:
-    return [t for t in REQUIRED_TABLES
-            if not (DATA_DIR / f"{t}.csv").exists() or (DATA_DIR / f"{t}.csv").stat().st_size == 0]
+    return [
+        t
+        for t in REQUIRED_TABLES
+        if not (DATA_DIR / f"{t}.csv").exists() or (DATA_DIR / f"{t}.csv").stat().st_size == 0
+    ]
 
 
 def data_version_wanted() -> str:
-    """DATA_VERSION from build_econ_dataset.py (read as text: this script needs no pandas)."""
-    m = re.search(r'^DATA_VERSION = "([^"]+)"', (ROOT / "build_econ_dataset.py")
-                  .read_text(encoding="utf-8"), re.M)
+    """DATA_VERSION from econdata/version.py (read as text: this script needs no pandas)."""
+    m = re.search(
+        r'^DATA_VERSION = "([^"]+)"',
+        (ROOT / "econdata" / "version.py").read_text(encoding="utf-8"),
+        re.M,
+    )
     return m.group(1) if m else ""
 
 
@@ -169,19 +206,25 @@ def data_version_built() -> str:
 def build_data(py: Path, refresh: bool) -> bool:
     """Build the tables. True if new tables were written; False if the build failed but the
     previous, complete data was kept; exits if there is no usable data."""
-    say(f"building the data tables in {DATA_DIR.name}/ "
-        "(first run downloads ~10-20 min; later runs use the cache)")
+    say(
+        f"building the data tables in {DATA_DIR.name}/ "
+        "(first run downloads ~10-20 min; later runs use the cache)"
+    )
     args = ["build_econ_dataset.py", "--out", str(DATA_DIR)] + (["--refresh"] if refresh else [])
     rc = run(py, *args)
-    if rc == 2:   # some sources failed, but every country has what the app needs
-        warn("some data sources failed and fell back to cached or reference values "
-             "(see the summary above); rebuild later with `python run.py data`")
+    if rc == 2:  # some sources failed, but every country has what the app needs
+        warn(
+            "some data sources failed and fell back to cached or reference values "
+            "(see the summary above); rebuild later with `python run.py data`"
+        )
     elif rc != 0:
         if not missing_tables() and data_version_built() == data_version_wanted():
             warn("the data build failed (see above); keeping the previous data")
             return False
-        die("the data build failed (see above). Run it again later (downloads already "
-            "cached are reused)")
+        die(
+            "the data build failed (see above). Run it again later (downloads already "
+            "cached are reused)"
+        )
     return True
 
 
@@ -193,8 +236,20 @@ def run_tests(py: Path) -> bool:
 def start_app(py: Path, cfg: dict[str, str]) -> int:
     host, port, base = cfg["HOST"], cfg["PORT"], cfg["BASE_URL_PATH"].strip("/")
     headless = "false" if cfg["OPEN_BROWSER"].lower() in ("1", "true", "yes") else "true"
-    args = ["-m", "streamlit", "run", "app.py", "--server.address", host, "--server.port", port,
-            "--server.headless", headless, "--browser.gatherUsageStats", "false"]
+    args = [
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.address",
+        host,
+        "--server.port",
+        port,
+        "--server.headless",
+        headless,
+        "--browser.gatherUsageStats",
+        "false",
+    ]
     if base:
         args += ["--server.baseUrlPath", base]
     shown = "<this machine's address>" if host == "0.0.0.0" else host
@@ -206,11 +261,14 @@ def start_app(py: Path, cfg: dict[str, str]) -> int:
 def main() -> None:
     if sys.version_info < (3, 10):
         die(f"Python 3.10+ is required (this is {sys.version.split()[0]})")
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
-                                 formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 epilog=__doc__.split("\n\n", 2)[2])
-    ap.add_argument("command", nargs="?", default="run",
-                    choices=["run", "setup", "start", "test", "data"])
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("\n\n", 2)[2],
+    )
+    ap.add_argument(
+        "command", nargs="?", default="run", choices=["run", "setup", "start", "test", "data"]
+    )
     ap.add_argument("--refresh", action="store_true", help="data: ignore the download cache")
     ap.add_argument("--no-test", action="store_true", help="skip the first-run tests")
     a = ap.parse_args()
@@ -220,9 +278,11 @@ def main() -> None:
     if not (cfg["PORT"].isdigit() and 1 <= int(cfg["PORT"]) <= 65535):
         die(f"PORT must be 1-65535, got {cfg['PORT']!r}")
     if not os.environ.get("CENSUS_API_KEY"):
-        warn("CENSUS_API_KEY is not set; US rents will use the built-in ACS 2025 reference "
-             "value, and US unemployment by age and degree falls back to OECD tables (no "
-             "functional-unemployment or over-qualification figures for the US)")
+        warn(
+            "CENSUS_API_KEY is not set; US rents will use the built-in ACS 2025 reference "
+            "value, and US unemployment by age and degree falls back to OECD tables (no "
+            "functional-unemployment or over-qualification figures for the US)"
+        )
 
     py = python_env(cfg)
     prefix = prefix_of(py)
@@ -243,11 +303,15 @@ def main() -> None:
         build_data(py, a.refresh)
         changed = True
     elif stale and a.command == "start":
-        warn("the data tables are from an incomplete build or an older version; "
-             "rebuild with `python run.py data`")
+        warn(
+            "the data tables are from an incomplete build or an older version; "
+            "rebuild with `python run.py data`"
+        )
     elif stale:
-        say("the data tables are from an incomplete build or an older version; rebuilding "
-            "(downloads already cached are reused)")
+        say(
+            "the data tables are from an incomplete build or an older version; rebuilding "
+            "(downloads already cached are reused)"
+        )
         build_data(py, a.refresh)
         changed = True
     else:
@@ -258,8 +322,9 @@ def main() -> None:
     marker = prefix / ".econcalc-tested"
     mode = cfg["RUN_TESTS"]
     want_tests = a.command == "setup" or (
-        a.command == "run" and (mode == "always" or (mode == "first-run"
-                                                     and (changed or not marker.exists()))))
+        a.command == "run"
+        and (mode == "always" or (mode == "first-run" and (changed or not marker.exists())))
+    )
     if want_tests:
         if a.no_test:
             say("skipping tests (--no-test)")
