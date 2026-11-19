@@ -349,7 +349,8 @@ definition everywhere:
   - Europe: Eurostat `lfsa_urgaed` (tertiary split into degree levels with OECD EAG ratios
     at 25-34).
   - US: computed from CPS basic monthly microdata (Census API, composite weights; the
-    current year is year-to-date).
+    current year is year-to-date). Every month of the last two years; before that, one
+    month a quarter back to 2015 for the history charts.
   - Canada/UK: OECD EAG (25-34, 25-64) and the OECD 15-24 rate × the education gap.
 - **Functional unemployment** (like the US U-6): the unemployed, plus part-timers who want
   and can work more hours, plus people who want a job and could start but have stopped
@@ -362,12 +363,23 @@ definition everywhere:
     so the UK is understated.
   - For ages 20-24, the extra slack is the 25-29 value × (20-24 / 25-29 unemployment),
     because 15-24 slack data are dominated by students.
-- **Hours underemployment:** the part-time piece of the above.
+  - Eurostat publishes slack by age only from 2021 (the survey reform). Earlier years
+    take the 2021 value and move it with the all-ages slack, which goes back to 2010
+    (marked as estimates).
 - **Over-qualification** (degree holders): employed graduates in jobs that do not usually
   need a degree, ISCO 4-9 (Eurostat `lfsa_eoqgan`).
   - US: occupations outside the management, business, financial and professional groups,
     except the sales/office jobs that ISCO puts in groups 2-3.
   - Not available for Canada and the UK on a comparable basis.
+- **Underemployment** (the ILO's two measurable kinds), as a percentage of the employed:
+  people working fewer hours than they want (part-timers who want and can work more),
+  plus, for graduates, those in a job that does not need their degree (over-qualified).
+  - US: counted person by person in the CPS, so nobody is counted twice.
+  - Elsewhere: the part-timers come from the slack data above. For graduates they are
+    combined with over-qualification as if the two were independent, because the
+    surveys publish no overlap.
+  - Being paid less than one's skills would earn (the ILO's income-related kind) has no
+    comparable measure and is left out.
 
 Youth (15-24) headline rates differ across countries mostly because of who is in the
 youth labour force. A full-time student looking for a part-time job counts as unemployed:

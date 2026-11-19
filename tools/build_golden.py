@@ -6,7 +6,8 @@ compare every table with a previous rebuild.
 
 (--cache: the download cache to build from, default econ_data/.cache.)
 
-The network is switched off and the cache never expires, so two builds from the same cache
+The network is switched off (a request that is not cached gets HTTP 404, as for data not yet
+published) and the cache never expires, so two builds from the same cache
 must give identical tables; a refactor of the builder that is meant to change nothing must
 pass `check`. Run both on the same day (some sources stop at the current year).
 """
@@ -26,10 +27,16 @@ SKIP = {"fetch_log.csv"}  # request timings, not data
 
 
 def build(out: Path, cache: Path) -> int:
-    def offline(*_a, **_k):
-        raise requests.ConnectionError("offline rebuild")
+    def offline(*_a, **_k):  # a cache miss is "not published" (HTTP 404), like a month
+        r = requests.Response()  # the Census has not released: sources skip it
+        r.status_code, r._content, r.url = (
+            404,
+            b"offline rebuild",
+            str(_a[2] if len(_a) > 2 else ""),
+        )
+        return r
 
-    requests.Session.request = offline  # cache misses fail like an outage
+    requests.Session.request = offline
     sys.path.insert(0, str(ROOT))
     import build_econ_dataset
 

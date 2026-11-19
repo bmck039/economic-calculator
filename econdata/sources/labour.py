@@ -569,9 +569,10 @@ CPS_VARS = (
 _CPS_MEMO: dict = {}
 
 
-def cps_month(f: CachedFetcher, y: int, i: int) -> pd.DataFrame | None:
+def cps_month(f: CachedFetcher, y: int, i: int, keep: bool = True) -> pd.DataFrame | None:
     """One month of CPS basic microdata (ages 16-64), or None if not released / not
-    collected (October 2025: federal shutdown). i = month index 0-11."""
+    collected (October 2025: federal shutdown). i = month index 0-11. keep=False: not
+    kept in memory for reuse (the older months only the job-market history needs)."""
     if (y, i) in _CPS_MEMO:
         return _CPS_MEMO[(y, i)]
     key = os.environ.get("CENSUS_API_KEY")
@@ -592,14 +593,16 @@ def cps_month(f: CachedFetcher, y: int, i: int) -> pd.DataFrame | None:
         )
     except FetchError as e:
         if "HTTP 404" in str(e) or "unexpected response" in str(e) or "HTTP 204" in str(e):
-            _CPS_MEMO[(y, i)] = None
+            if keep:
+                _CPS_MEMO[(y, i)] = None
             return None
         raise
     d = pd.DataFrame(js[1:], columns=js[0]).loc[:, lambda x: ~x.columns.duplicated()]
     ids = d[["HRHHID", "HRHHID2"]].astype(str)
     d = d.drop(columns=["HRHHID", "HRHHID2"]).apply(pd.to_numeric, errors="coerce")
     d = pd.concat([d, ids], axis=1).assign(month=i + 1, year=y)
-    _CPS_MEMO[(y, i)] = d
+    if keep:
+        _CPS_MEMO[(y, i)] = d
     return d
 
 
@@ -651,10 +654,15 @@ def cps_rates(d: pd.DataFrame) -> dict:
     # except the sales and office jobs ISCO classes as associate professional
     ocd = d["PTIO1OCD"] if "PTIO1OCD" in d else pd.Series(-1, index=d.index)
     nongrad_job = occ & d["PRMJOCC1"].between(3, 10) & ~ocd.isin(CPS_GRAD_OCC)
+    # underemployed (ILO): working too few hours, or - graduates - in a job below their
+    # skills (associate degree and above, as TERTIARY)
+    grad = d["PEEDUCA"] >= 41
+    under = emp & (ptw | (grad & nongrad_job))
     W = lambda m: float(w[m].sum())  # noqa: E731
-    lfw, elf = W(lf), W(lf) + W(ma)
+    lfw, elf, empw = W(lf), W(lf) + W(ma), W(emp)
     if lfw <= 0:
         return {}
+    nan = float("nan")
     return {
         "unemployment": 100 * W(un) / lfw,
         "functional": 100 * (W(un) + W(ptw) + W(ma)) / elf,
@@ -662,28 +670,40 @@ def cps_rates(d: pd.DataFrame) -> dict:
         "hours_underemployment": 100 * W(ptw) / elf,
         "slack_extra": 100 * (W(ptw) + W(ma)) / elf,
         "marginally_attached": 100 * W(ma) / elf,
-        "overqualification": 100 * W(nongrad_job) / W(occ) if W(occ) else float("nan"),
+        "overqualification": 100 * W(nongrad_job) / W(occ) if W(occ) else nan,
+        "time_underemployment": 100 * W(ptw) / empw if empw else nan,
+        "underemployment": 100 * W(under) / empw if empw else nan,
         "n_lf": float(lf.sum()),
     }
 
 
+# Earlier years of the job-market history: one month a quarter (a third of a full year's
+# sample, enough for 20-24-year-old graduates) keeps the download and memory small.
+CPS_HISTORY_FROM = 2015
+CPS_HISTORY_MONTHS = (0, 3, 6, 9)  # Jan, Apr, Jul, Oct
+
+
 def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
     """US rates by age and education straight from the CPS basic monthly microdata (Census
-    API), pooled by calendar year: the current year so far and last year. BLS publishes
-    no age x education U-6, and OECD/BLS annual tables lag (or, for 2025, are missing)."""
+    API), pooled by calendar year: every month of last year and of the current year so
+    far; one month a quarter back to CPS_HISTORY_FROM, for the history charts. BLS
+    publishes no age x education U-6, and OECD/BLS annual tables lag (or, for 2025, are
+    missing)."""
     now = datetime.now()
     rows = []
-    for y in (now.year - 1, now.year):
+    for y in range(CPS_HISTORY_FROM, now.year + 1):
+        recent = y >= now.year - 1
         months = []
-        for i in range(12):
+        for i in range(12) if recent else CPS_HISTORY_MONTHS:
             if y == now.year and i + 1 >= now.month:
                 break
-            d = cps_month(f, y, i)
+            d = cps_month(f, y, i, keep=recent)
             if d is not None:
-                months.append(d.copy())
+                months.append(d.copy() if recent else d)
         if not months:
             continue
         d = pd.concat(months, ignore_index=True)
+        del months
         d["PWCMPWGT"] = d["PWCMPWGT"] / d["month"].nunique()  # pooled = average month
         d["edu"] = cps_education(d["PEEDUCA"])
         tert = d["edu"].isin(["short_tertiary", "bachelor", "master_plus"])
@@ -705,8 +725,12 @@ def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
                             "category": edu,
                             "statistic": stat,
                             "value": v,
-                            "estimated": len(got) < 12,
-                            "method": f"{len(got)} months pooled ({span})",
+                            "estimated": recent and len(got) < 12,
+                            "method": (
+                                f"{len(got)} months pooled ({span})"
+                                if recent
+                                else f"{len(got)} months sampled (one a quarter, {y})"
+                            ),
                         }
                     )
     if not rows:
@@ -721,7 +745,10 @@ def labour_us_cps(f: CachedFetcher, since: int | None) -> pd.DataFrame:
         "weights. functional = (unemployed + part-timers wanting full-time + "
         "marginally attached) / (labour force + marginally attached); "
         "overqualification = employed outside management, business, financial and "
-        "professional occupations (approximates ISCO 4-9).",
+        "professional occupations (approximates ISCO 4-9); underemployment = employed "
+        "part-timers wanting more hours + graduates in non-graduate jobs, of the "
+        "employed. Before 2020 occupations are 2010 Census codes (secretaries not split "
+        "by kind).",
     )
 
 

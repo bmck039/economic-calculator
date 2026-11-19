@@ -31,7 +31,7 @@ def test_app_runs_for_country(country):
     at.sidebar.selectbox[0].set_value(country).run()
     assert not at.exception, at.exception
     assert any(country in t.value for t in at.title)
-    assert len(at.metric) == 5 + 8  # headline row + job market (2 partners x 4)
+    assert len(at.metric) == 5 + 10  # headline row + job market (2 partners x 5)
 
 
 def _w(at, kind, label):
@@ -75,6 +75,7 @@ def test_app_degrees(country):
     m = {x.label: x.value for x in at.metric}
     if (Path(APP).parent / "econ_data" / "labour_market.csv").exists():
         assert m["Functional unemployment"] not in ("—", None)
+        assert m["Underemployed"] not in ("—", None)
     _w(at, "checkbox", "Pay follows the degree").set_value(False).run()
     assert not at.exception, at.exception
 

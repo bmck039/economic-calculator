@@ -20,6 +20,9 @@ def render(page) -> None:
         "one: the unemployed + part-timers who want full-time hours + people who want "
         "work but have stopped looking (Eurostat 'labour-market slack', the "
         "international version of the US U-6). **Headline** is the official ILO rate. "
+        "**Underemployed** counts people with a job that falls short of what they "
+        "want or can do: working fewer hours than they want, or (graduates) in a job "
+        "that does not need their degree, as a share of the employed. "
         "Rates are for people of the partner's age band and highest degree (e.g. a "
         "bachelor's at 23 = 20-24-year-old graduates, i.e. recent graduates). "
         "Same definitions in every country; the US is computed from Census/BLS CPS "
@@ -42,7 +45,19 @@ def render(page) -> None:
         "unemployment",
         c1,
     )
+    _lm_chart(
+        page,
+        ctx_iso,
+        "underemployment",
+        f"Underemployed — ages {age_band(a_)}, {EDU_SHORT[e_].lower()} (dotted: too few hours)",
+        a_,
+        e_,
+        "time_underemployment",
+        c2,
+        dashed_name="too few hours",
+    )
     if e_ in TERTIARY:
+        c3, _ = st.columns(2)
         _lm_chart(
             page,
             ctx_iso,
@@ -51,18 +66,7 @@ def render(page) -> None:
             a_,
             e_,
             None,
-            c2,
-        )
-    else:
-        _lm_chart(
-            page,
-            ctx_iso,
-            "hours_underemployment",
-            f"Underemployed part-timers — ages {age_band(a_)}, {EDU_SHORT[e_].lower()}",
-            a_,
-            e_,
-            None,
-            c2,
+            c3,
         )
     with st.expander("Why youth unemployment looks so different across countries"):
         st.markdown(
@@ -117,7 +121,8 @@ def _partner_job_market(col, i: int, age: int, edu: str, cd) -> None:
     lab = cd.labour or {}
     f_ = lab.get(("functional", band, edu))
     u_ = lab.get(("unemployment", band, edu))
-    h_ = lab.get(("hours_underemployment", band, edu))
+    t_ = lab.get(("time_underemployment", band, edu))
+    ue_ = lab.get(("underemployment", band, edu))
     o_ = lab.get(("overqualification", band, edu)) if edu in TERTIARY else None
     col.markdown(
         f"**Partner {i + 1}** — ages {band}, {EDU_SHORT[edu].lower()}"
@@ -126,10 +131,23 @@ def _partner_job_market(col, i: int, age: int, edu: str, cd) -> None:
     m1, m2 = col.columns(2)
     m1.metric("Functional unemployment", _pct(f_), help=_lm_help(f_, "slack"))
     m2.metric("Headline unemployment", _pct(u_), help=_lm_help(u_, "unemployment"))
-    m3, m4 = col.columns(2)
-    m3.metric("Underemployed (want more hours)", _pct(h_), help=_lm_help(h_, "hours"))
+    m3, m4, m5 = col.columns(3)
+    m3.metric(
+        "Underemployed",
+        _pct(ue_),
+        help=_lm_help(ue_, "underemployment")
+        + " Employed people working fewer hours than they want"
+        + (", or in a job that does not need their degree" if edu in TERTIARY else "")
+        + "; % of the employed.",
+    )
     m4.metric(
-        "Graduates in non-graduate jobs",
+        "Too few hours",
+        _pct(t_),
+        help=_lm_help(t_, "hours")
+        + " Part-timers who want and can work more hours; % of the employed.",
+    )
+    m5.metric(
+        "Non-graduate job",
         _pct(o_) if edu in TERTIARY else "n/a",
         help=(
             _lm_help(o_, "over-qualification")
@@ -143,8 +161,11 @@ def _partner_job_market(col, i: int, age: int, edu: str, cd) -> None:
     )
 
 
-def _lm_chart(page, ctx_iso, indicator, title, age, edu, dashed=None, col=None):
-    """One labour-market indicator over time, for each place."""
+def _lm_chart(
+    page, ctx_iso, indicator, title, age, edu, dashed=None, col=None, dashed_name="headline"
+):
+    """One labour-market indicator over time, for each place (dashed: a second indicator,
+    dotted)."""
     ds, names = page.ds, page.names
     band, fig, srcs = age_band(age), go.Figure(), set()
     for i, c in enumerate(ctx_iso):
@@ -153,7 +174,7 @@ def _lm_chart(page, ctx_iso, indicator, title, age, edu, dashed=None, col=None):
             if d.empty:
                 continue
             srcs.add(str(d["source"].iloc[-1]))
-            nm = names[c] + ("" if dash is None else " (headline)")
+            nm = names[c] + ("" if dash is None else f" ({dashed_name})")
             fig.add_scatter(
                 x=d["year"],
                 y=d["value"],

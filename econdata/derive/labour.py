@@ -100,6 +100,54 @@ def _sup_edu(lm: _LM, src: str, edu: str, Y: int) -> list[float] | None:
     return [100 * (t or 0.0) / elf for t in ths[:-1]]
 
 
+def _band_slack(lm: _LM, src: str, band: str, Y: int) -> tuple[dict | None, str]:
+    """Eurostat slack beyond unemployment for an age band, % of its extended labour force:
+    {'uemp_pt': part-timers wanting more hours, 'nseek_avl': available, not seeking}."""
+    if band == "25-29":  # 25-29 = (15-29) - (15-24), in persons
+        parts = {}
+        for a in ("15-29", "15-24"):
+            ths = [
+                lm.get(src, "lfsi_sla_a", s, a, "all", Y, unit="thousand persons")[0]
+                for s in SLACK_EXTRA + ["une"]
+            ]
+            pc = lm.get(src, "lfsi_sla_a", "une", a, "all", Y, unit=PC_ELF)[0]
+            if ths[0] is None or ths[-1] is None or not pc:
+                parts = None
+                break
+            parts[a] = ([t or 0.0 for t in ths], ths[-1] / pc * 100)
+        if parts and parts["15-29"][1] > parts["15-24"][1]:
+            elf = parts["15-29"][1] - parts["15-24"][1]
+            x = {
+                s: 100 * (parts["15-29"][0][i] - parts["15-24"][0][i]) / elf
+                for i, s in enumerate(SLACK_EXTRA)
+            }
+            return x, "ages 25-29 (15-29 minus 15-24)"
+    x = {s: lm.get(src, "lfsi_sla_a", s, "25-54", "all", Y, unit=PC_ELF)[0] for s in SLACK_EXTRA}
+    if x["uemp_pt"] is None and x["nseek_avl"] is None:
+        return None, ""
+    return x, "ages 25-54"
+
+
+def _band_slack_backcast(lm: _LM, src: str, band: str, Y: int) -> tuple[dict | None, str]:
+    """Slack by age before Eurostat published it (2021): the earliest published year,
+    moved with the all-ages (15-74) slack, which goes back to 2010."""
+    first = [y for y in lm.years(src, "lfsi_sla_a", "uemp_pt", "25-54") if y > Y]
+    if not first:
+        return None, ""
+    Yr = min(first)
+    x, xn = _band_slack(lm, src, band, Yr)
+    if x is None:
+        return None, ""
+    out = {}
+    for s_ in SLACK_EXTRA:
+        now = lm.get(src, "lfsi_sla_a", s_, "15-74", "all", Y, unit=PC_ELF)[0]
+        ref = lm.get(src, "lfsi_sla_a", s_, "15-74", "all", Yr, unit=PC_ELF)[0]
+        if now is None or not ref:
+            return None, ""
+        out[s_] = (x[s_] or 0.0) * now / ref
+    return out, f"{xn} in {Yr}, moved with all-ages slack (no age split before {Yr})"
+
+
 def _lm_europe(lm: _LM, iso: str, src: str, Y: int, band: str, edu: str) -> dict:
     """One cell for a Eurostat country (src = the country whose data is used). Returns
     {'unemployment': (v, est, note), 'extra': (slack beyond unemployment, of which hours,
@@ -131,34 +179,10 @@ def _lm_europe(lm: _LM, iso: str, src: str, Y: int, band: str, edu: str) -> dict
             notes.append("all tertiary (no split by degree)")
     out["unemployment"] = (u, est, "; ".join(notes))
     if band != "20-24":
-        x, xn = None, ""
-        if band == "25-29":  # 25-29 = (15-29) - (15-24), in persons
-            parts = {}
-            for a in ("15-29", "15-24"):
-                ths = [
-                    lm.get(src, "lfsi_sla_a", s, a, "all", Y, unit="thousand persons")[0]
-                    for s in SLACK_EXTRA + ["une"]
-                ]
-                pc = lm.get(src, "lfsi_sla_a", "une", a, "all", Y, unit=PC_ELF)[0]
-                if ths[0] is None or ths[-1] is None or not pc:
-                    parts = None
-                    break
-                parts[a] = ([t or 0.0 for t in ths], ths[-1] / pc * 100)
-            if parts and parts["15-29"][1] > parts["15-24"][1]:
-                elf = parts["15-29"][1] - parts["15-24"][1]
-                x = {
-                    s: 100 * (parts["15-29"][0][i] - parts["15-24"][0][i]) / elf
-                    for i, s in enumerate(SLACK_EXTRA)
-                }
-                xn = "ages 25-29 (15-29 minus 15-24)"
-        if x is None:
-            x = {
-                s: lm.get(src, "lfsi_sla_a", s, "25-54", "all", Y, unit=PC_ELF)[0]
-                for s in SLACK_EXTRA
-            }
-            xn = "ages 25-54"
-            if x["uemp_pt"] is None and x["nseek_avl"] is None:
-                x = None
+        x, xn = _band_slack(lm, src, band, Y)
+        if x is None:  # before the 2021 survey reform: no slack by age
+            x, xn = _band_slack_backcast(lm, src, band, Y)
+            est = est or x is not None
         if x is not None:
             x = {k: max(v or 0.0, 0.0) for k, v in x.items()}
             r_all = r_pt = 1.0
@@ -222,6 +246,10 @@ def _lm_us(lm: _LM, Y: int, band: str, edu: str) -> dict:
         o = g("overqualification", "25-34") if thin else g("overqualification")
         if o is not None:
             out["overqualification"] = (o, est or thin, method + ("; ages 25-34" if thin else ""))
+    ue = thin_fix("underemployment") if thin else g("underemployment")
+    te = thin_fix("time_underemployment") if thin else g("time_underemployment")
+    if ue is not None and te is not None and ue == ue:
+        out["under"] = (ue, te, est or thin, note)
     return out
 
 
@@ -273,9 +301,53 @@ def _lm_ca_uk(lm: _LM, iso: str, Y: int, band: str, edu: str) -> dict:
     return out
 
 
+def _underemployment(c: dict, edu: str) -> dict:
+    """Underemployed (ILO): employed people working fewer hours than they want, or -
+    graduates - in a job that does not need their degree, % of the employed. US: counted
+    person by person in the CPS. Elsewhere: the part-timers wanting more hours, moved from
+    the extended labour force to the employed, and for graduates combined with
+    over-qualification as if the two were independent (the surveys publish no overlap)."""
+    if "under" in c:
+        ue, te, est, note = c["under"]
+        return {
+            "underemployment": (ue, est, note),
+            "time_underemployment": (te, est, note),
+        }
+    if "unemployment" not in c or "extra" not in c:
+        return {}
+    u, ue, _ = c["unemployment"]
+    x, h, xe, xn = c["extra"]
+    emp = (1 - max(x - h, 0.0) / 100) * (1 - u / 100)  # employed / extended labour force
+    if emp <= 0:
+        return {}
+    t = h / emp
+    out = {"time_underemployment": (t, xe, xn + "; as % of the employed")}
+    if edu in TERTIARY_SUB:
+        if "overqualification" not in c:
+            return out
+        o, oe, on = c["overqualification"]
+        out["underemployment"] = (
+            t + o - t * o / 100,
+            True,
+            f"part-timers wanting more hours ({xn}) + graduates in non-graduate jobs "
+            f"({on}), overlap assumed independent",
+        )
+    elif edu == "all":  # over-qualification is published for graduates only
+        out["underemployment"] = (
+            t,
+            True,
+            xn + "; part-timers wanting more hours only (graduates' over-qualification "
+            "not included)",
+        )
+    else:
+        out["underemployment"] = (t, xe or ue, xn + "; part-timers wanting more hours")
+    return out
+
+
 def derive_labour_market(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
-    """Unemployment, functional unemployment (U-6-like slack), hours underemployment and
-    over-qualification by age band and education, on one definition for every country.
+    """Unemployment, functional unemployment (U-6-like slack), hours underemployment,
+    over-qualification and underemployment (either) by age band and education, on one
+    definition for every country.
 
     functional = unemployment + 'extra' slack (part-timers wanting more hours + people who
     want work and could start but are not searching). For ages 20-24 the extra slack is
@@ -295,6 +367,8 @@ def derive_labour_market(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
         "functional": PC_ELF,
         "hours_underemployment": PC_ELF,
         "overqualification": "% of employed graduates in non-graduate jobs",
+        "time_underemployment": "% of employed",
+        "underemployment": "% of employed",
     }
     for iso in COUNTRIES:
         if iso == "USA" and lm.years("USA", "CPS basic monthly", "unemployment", "25-29"):
@@ -355,6 +429,7 @@ def derive_labour_market(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
                         out["hours_underemployment"] = (h, xe, xn)
                 if "overqualification" in c:
                     out["overqualification"] = c["overqualification"]
+                out.update(_underemployment(c, e))
                 for ind, (v, est, note) in out.items():
                     if v is None or v != v:
                         continue

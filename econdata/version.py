@@ -35,4 +35,6 @@ from __future__ import annotations
 #  13: spending levels fitted on what households plan to spend (with the cuts made when
 #      money runs short, saving could not fall much below zero, so a level far too high
 #      still "fitted" - e.g. the US 1.49 instead of ~1.3, as the US backtest also finds).
-DATA_VERSION = "13"
+#  14: labour_market: US history back to 2015 (CPS, one month a quarter), Eurostat slack
+#      by age back-cast before 2021, underemployment (too few hours or over-qualified).
+DATA_VERSION = "14"

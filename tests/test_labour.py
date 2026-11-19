@@ -52,8 +52,32 @@ def test_cps_rates_definitions():
     assert r["u6"] == pytest.approx(50)  # PRWKSTAT 7 is not 'economic reasons'
     assert r["overqualification"] == pytest.approx(50)  # sales of 2 employed
     assert r["slack_extra"] == pytest.approx(50)
+    # underemployed = too few hours or a job below a graduate's skills, of the employed
+    assert r["time_underemployment"] == pytest.approx(50)
+    assert r["underemployment"] == pytest.approx(50)  # the part-timer, counted once
     d.loc[1, "PTIO1OCD"] = 4810  # insurance agent: ISCO 3321, graduate job
     assert cps_rates(d)["overqualification"] == 0
+    d.loc[0, ["PRMJOCC1", "PTIO1OCD"]] = [4, 4760]  # full-time graduate in retail sales
+    assert cps_rates(d)["underemployment"] == pytest.approx(100)
+    d.loc[0, "PEEDUCA"] = 39  # ... without a degree: not over-qualified
+    assert cps_rates(d)["underemployment"] == pytest.approx(50)
+
+
+def test_underemployment_outside_the_us():
+    from econdata.derive.labour import _underemployment
+
+    # 5% unemployed; extra slack 4% of the extended labour force, of which 3% part-timers
+    c = {"unemployment": (5.0, False, ""), "extra": (4.0, 3.0, False, "")}
+    emp = (1 - 0.01) * (1 - 0.05)
+    out = _underemployment(c, "upper_secondary")
+    assert out["time_underemployment"][0] == pytest.approx(3 / emp)
+    assert out["underemployment"][0] == pytest.approx(3 / emp)
+    c["overqualification"] = (20.0, False, "")
+    t = 3 / emp
+    assert _underemployment(c, "bachelor")["underemployment"][0] == pytest.approx(
+        t + 20 - t * 20 / 100
+    )
+    assert _underemployment({"unemployment": (5.0, False, "")}, "bachelor") == {}
 
 
 def test_cps_education_mapping():
@@ -134,6 +158,27 @@ def test_europe_functional_rate_adds_slack_with_education_gap():
     )["value"]
     assert f[("25-29", "all")] == pytest.approx(7.0)
     assert f[("20-24", "all")] == pytest.approx(8.0 + 3.0 * 2.0)
+
+
+def test_europe_slack_before_2021_moves_with_all_ages_slack():
+    E = PC_ELF
+    rows = [("DEU", "lfsa_urgaed", "rate", "25-29", "all", "%", 4.0, y) for y in (2019, 2021)] + [
+        ("DEU", "lfsi_sla_a", "uemp_pt", "25-54", "all", E, 2.0, 2021),
+        ("DEU", "lfsi_sla_a", "nseek_avl", "25-54", "all", E, 1.0, 2021),
+        ("DEU", "lfsi_sla_a", "uemp_pt", "15-74", "all", E, 4.0, 2021),
+        ("DEU", "lfsi_sla_a", "nseek_avl", "15-74", "all", E, 2.0, 2021),
+        ("DEU", "lfsi_sla_a", "uemp_pt", "15-74", "all", E, 6.0, 2019),  # 1.5x
+        ("DEU", "lfsi_sla_a", "nseek_avl", "15-74", "all", E, 1.0, 2019),  # 0.5x
+    ]
+    df = pd.DataFrame(
+        rows,
+        columns=["iso3", "series", "statistic", "age_band", "category", "unit", "value", "year"],
+    ).assign(estimated=False, method=None)
+    lm = _LM(df)
+    assert not _lm_europe(lm, "DEU", "DEU", 2021, "25-29", "all")["extra"][2]
+    x = _lm_europe(lm, "DEU", "DEU", 2019, "25-29", "all")["extra"]
+    assert x[:2] == (pytest.approx(2.0 * 1.5 + 1.0 * 0.5), pytest.approx(3.0))
+    assert x[2] and "2021" in x[3]  # an estimate, saying from what
 
 
 def test_education_pay_is_relative_to_employment_weighted_mean():
