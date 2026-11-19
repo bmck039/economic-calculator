@@ -223,7 +223,8 @@ official statistics ──► econdata/ ──► econ_data/*.csv ──► econ
 | Family | Births start the country's parental leave. Afterwards, the main parent works the country's typical employment rate × hours of mothers, until the youngest is 18. |
 | Taxes | The local average tax-rate curve with joint taxation where it exists (DE/LU/PT/PL splitting, FR quotient familial), youth exemptions (PL, HU, HR, PT, GR), compulsory occupational pensions (CH, NL, DK, IS, LI). US: federal + state + local, FICA, CTC, EITC, Medicaid / CHIP. |
 | Job loss and risk | A simulated job loss replaces pay with benefits at the OECD replacement rates. Otherwise, the expected cost of unemployment for each partner's age and degree is deducted. |
-| Spending | The survey couple's basket, raised to national accounts category by category, × the country's calibrated spending level. It scales with income relative to the survey couple's: ^1.0 below it, ^0.4 above it. Rent, the home a buyer can afford (^0.75) and cars (^0.25) follow income too. Children add per-person spending (OECD-modified scale) and childcare until free pre-school. Before retirement, 4% of savings above the emergency fund is spent each year (not by renters saving for a home). |
+| Spending | The survey couple's basket, raised to national accounts category by category, × the country's calibrated spending level. It scales with income relative to the survey couple's: ^1.0 below it, ^0.4 above it. The home a buyer can afford (^0.75) and cars (^0.25) follow income too. Children add per-person spending (OECD-modified scale) and childcare until free pre-school. Before retirement, 4% of savings above the emergency fund is spent each year (not by renters saving for a home). |
+| Renting | You stay in your home, and its rent rises with the rent index less the tenure discount (US 1.5% a year). Each year, the share of renting couples your age who move (US: 35% under 25, 19% at 30-34, 10% after 45; scaled by each country's renters' moves) take a new lease. It costs what a couple with your income (US ^0.4; each country's own) and children (+7% / +16% or the country's ratio) pays now. If the rent passes 60% of net income and a cheaper place is found, you move. The rent shown is the expected one, so it rises smoothly rather than at one guessed moving date. |
 | Housing | Renters buy once the down payment, taxes and fees are saved (keeping 6 months' spending as a buffer) and the loan fits the country's limits. The mortgage follows the country's fixation and term. US and Danish owners refinance when new loans cost a point less. Owned homes follow the repeat-sales price index. |
 | Shortfalls | If money runs short (savings used up), discretionary spending is cut first, by up to half. Then a little is borrowed (unsecured, up to a quarter of a year's income), then all living costs are cut, by up to 30%. With "Cut optional spending before using savings", the cuts start as soon as a working year's income falls short of the regular bills. Retired owners borrow against the home, and the state's minimum income for older people covers the rest. |
 | Balances | The emergency fund (6 months) is kept in cash. Savings above it are split between deposits and investments as typical households (the bottom 70% by wealth) hold theirs, moving toward the whole household sector's mix as savings grow (halfway at a year's income). Employer pension contributions build a retirement account. |
@@ -338,6 +339,69 @@ at its own price trend. Each run reports **your own inflation** next to the CPI 
 index of the household's own spending, in which a fixed-rate mortgage does not rise).
 "Today's money" can be shown by either.
 
+### Renting: staying put, and what a move costs
+
+Renters mostly stay where they are, and a sitting tenant's rent rises more slowly than
+new leases (the "tenure discount"). When they move, they take what a household with their
+income and children rents now. The model follows that, with figures measured on US
+microdata (`python -m tools.rent_research`, Census ACS PUMS 2013-2023 and CPS ASEC
+2023-2025, married couples who rent, compared within the same area):
+
+| | Measured | Model |
+|---|---|---|
+| Couples who move each year | 35% under 25, 28% at 25-29, 19% at 30-34, 16% at 35-39, ~10% after 40 (CPS ASEC) | The same, by partner 1's age; other countries scaled (below) |
+| Why they move | Job 27%, a better or bigger home or area 26%, family 21%, a cheaper home 10% | A move takes a new lease at today's market for the household |
+| Sitting tenants vs new leases | −7 to −8% after 2-4 years, −13 to −17% after 5-9 (same size of home, area and income) | Their rent rises 1.5%/yr less than the rent index (× how often the country's renters move: the index follows all tenancies, and leases reset on moving are what lift it) |
+| Rent vs income (new leases) | 0.41-0.43 with permanent income (education × age as instruments; 0.2 on one year's income). Studies: renters 0.3-0.5 (Mayo 1981; Goodman & Kawai) | ^0.4 in the US (before v0.9.2: ^0.75, every year); other countries below |
+| Children (new leases, same income) | +5-8% with one, +11-16% with two | +7% / +16% (US; a country's own EU-SILC ratios where published) |
+| Unaffordable rent | | Above 60% of net income (HUD's "severe" burden is half of gross), the household moves somewhere cheaper |
+
+**Every other country** (`econsim/params/renting.csv`, `python -m tools.rent_research
+--write`):
+
+- **Rent vs income.** The OECD Affordable Housing Database (HC1.2.A2) gives tenants'
+  median rent burden by income quintile, computed from each country's household survey
+  (EU-SILC; the ACS for the US). Eurostat (`ilc_di01`) gives each quintile's share of
+  income, and the ACS gives the same for the US. Together they show how rent rises from
+  the 2nd to the top quintile (2015-2024 pooled). That spread also reflects richer
+  households living in dearer places (the US shows 0.56 on it, against 0.4 within the
+  same area), so each country is scaled by the US: 0.4 × country ÷ US.
+- **How often renters move.** The share of tenants at market rent who moved in the last
+  five years (EU-SILC 2012, `ilc_hcmp05`; the US from the ACS 2013, 73%), turned into a
+  yearly hazard relative to the US, scales the US rates by age.
+- Countries with too few tenants in the upper quintiles take the European median (0.31);
+  Canada takes the US values, and Liechtenstein Switzerland's moves.
+
+Elasticity / moves vs the US:
+
+Austria 0.29 / 0.40; Belgium 0.28 / 0.50; Bulgaria 0.31 / 0.30; Croatia 0.31 / 0.41; Cyprus 0.31 / 1.28; Czechia 0.31 / 0.17; Denmark 0.22 / 0.60; Estonia 0.31 / 0.80; Finland 0.27 / 0.75; France 0.47 / 0.56; Germany 0.36 / 0.33; Greece 0.29 / 0.32; Hungary 0.31 / 0.51; Ireland 0.56 / 0.68; Italy 0.28 / 0.20; Latvia 0.31 / 0.28; Lithuania 0.31 / 0.97; Luxembourg 0.31 / 0.51; Malta 0.31 / 0.43; Netherlands 0.26 / 0.30; Poland 0.52 / 0.48; Portugal 0.55 / 0.36; Romania 0.31 / 0.29; Slovakia 0.31 / 0.15; Slovenia 0.31 / 0.31; Spain 0.40 / 0.55; Sweden 0.22 / 0.67; Iceland 0.31 / 1.58; Liechtenstein 0.31 / 0.44; Norway 0.31 / 1.05; Switzerland 0.38 / 0.44; United Kingdom 0.36 / 1.12; Canada 0.40 / 1.00.
+
+Rent follows income least where regulated or social renting is large (Sweden and Denmark
+0.22, the Netherlands 0.26) and most in France, Poland, Ireland and Portugal (0.47-0.56).
+Renters move least in Slovakia, Czechia and Italy (0.15-0.20 × the US) and as often as in
+the US in the UK, Norway, Lithuania, Cyprus and Iceland. With each country's own values,
+the euro-area backtest is the same as with the US values everywhere (+0.33 / 0.89).
+
+The default rents are new leases already (US: ACS rents of recent movers; Europe: asking
+rents), so a household starts at today's market and then falls behind it while it stays.
+The rent shown is the expected one, averaged over the chance of moving each year, so it
+rises smoothly instead of at one guessed moving date.
+
+Checked on history with the same birth years (ACS 2013 → 2018 → 2023), rent against the
+rent index grew by this share of each cohort's income growth over the 10 years. The model
+was run through the same years:
+
+| Aged in 2013 | Survey | Model | Before v0.9.2 |
+|---|---|---|---|
+| 22-26 | 0.62 | 0.50-0.52 | 1.31-1.33 |
+| 25-29 | 0.60 | 0.60-0.62 | 1.42-1.43 |
+| 30-34 | 0.38 | 0.33-0.39 | 0.80-0.83 |
+
+(The survey cohorts lose their higher earners to buying, and 2021-23 new leases outran
+the index, so the survey's ratio is if anything high.) The wealth backtests are unchanged
+in the US and slightly better in the euro area; the euro area's ownership is 0.6 points
+further off.
+
 ### Job market by age and degree
 
 The Context tab and the unemployment cost use `econ_data/labour_market.csv`. It covers
@@ -414,18 +478,18 @@ Result with the defaults:
 
 | | Bias | Mean absolute error |
 |---|---|---|
-| Wealth (years of the cohort's median wages) | −0.08 (v0.8: −0.27) | 0.74 (0.77; ~0.5 of it is sampling noise in the survey cells and the model's sample) |
-| Home ownership (percentage points) | −0.5 (−0.7) | 5.3 (5.3) |
-| Spread: 25th / 75th percentile of wealth | +0.07 / −0.68 (−0.02 / −0.98) | |
-| Bottom / top third by wages | −0.44 / +0.10 (−0.53 / −0.27) | |
+| Wealth (years of the cohort's median wages) | −0.08 (v0.9: −0.08) | 0.74 (0.74; ~0.5 of it is sampling noise in the survey cells and the model's sample) |
+| Home ownership (percentage points) | −0.5 (−0.5) | 5.3 (5.3) |
+| Spread: 25th / 75th percentile of wealth | +0.03 / −0.68 (+0.07 / −0.68) | |
+| Bottom / top third by wages | −0.52 / +0.10 (−0.44 / +0.10) | |
 
 By degree:
 
-- Couples with a degree are −0.28 at the median, −0.33 for their top third by pay, and
+- Couples with a degree are −0.28 at the median, −0.34 for their top third by pay, and
   −1.4 for their top quarter of wealth.
-- Couples without a degree are +0.12, with their top quarter on target.
+- Couples without a degree are +0.11, with their top quarter on target.
 
-The bias grows with the horizon: −0.02 up to 6 years, −0.45 beyond 12. The top of the
+The bias grows with the horizon: −0.02 up to 6 years, −0.46 beyond 12. The top of the
 wealth distribution also reflects inheritances, own businesses and returns above the
 market's, which the model does not have. The bottom third by wages holds about half a
 year's wages too little in every variant. Couples who started young (head under 32) end
@@ -546,14 +610,14 @@ Result for 22 countries, 315 cells (start waves 2010-2017, 3-11 years later):
 
 | | Bias | Mean absolute error |
 |---|---|---|
-| Wealth (years of the cohort's median income) | +0.39 (v0.8: +0.35) | 0.91 (0.90) |
-| Home ownership (percentage points) | −3.3 (within the method's own −9) | 5.3 |
+| Wealth (years of the cohort's median income) | +0.33 (v0.9: +0.39) | 0.89 (0.91) |
+| Home ownership (percentage points) | −3.9 (−3.3; within the method's own −9) | 5.8 (5.3) |
 
 The error does not grow with the horizon. By country (mean error, in years of income):
 
-- **Too much wealth:** Croatia (+2.1), Spain (+1.5: the 2012-14 house-price fall and young
-  Spaniards' weak incomes), Cyprus, Portugal and Slovenia (+1.0).
-- **Too little:** Italy (−0.6) and Germany (−0.5). In Italy, young households' median
+- **Too much wealth:** Croatia (+2.0), Spain (+1.4: the 2012-14 house-price fall and young
+  Spaniards' weak incomes), Cyprus, Estonia, Portugal and Slovenia (+1.0).
+- **Too little:** Italy (−0.7) and Germany (−0.7). In Italy, young households' median
   wealth triples between 30 and 40, from inheritances and family help the model does not
   have.
 - Most others are within ±0.5.
@@ -646,6 +710,7 @@ rebuild.
 | `components/settings_store/` | A tiny Streamlit component (plain HTML/JS) that keeps the settings in the browser |
 | `reference/hfcs_tables.csv`, `tools/hfcs_tables.py` | The ECB HFCS statistical tables (PDF only), compiled into one table, and the script that does it |
 | `tools/golden.py`, `app_golden.py`, `build_golden.py` | Exact-results checks for refactoring (below) |
+| `tools/rent_research.py`, `econsim/params/renting.csv` | The data behind the renting assumptions (US: Census ACS PUMS, CPS ASEC; every country: OECD, EU-SILC) and the table it writes |
 | `tests/` | Engine (synthetic country), life events, curated rules, every country's invariants, careers, cohorts, backtests, the builder's parsers, settings, and the app (Streamlit AppTest) |
 
 ## Development
@@ -710,6 +775,12 @@ them.
 - **Generation gaps for Europe** rest on four SES waves in 10-year bands, and borrow from
   the US how long gaps last.
 - **Singles.** The US backtest is on couples: singles are not tested.
+- **Renting outside the US.** How rent follows income and how often renters move are
+  measured for each country from published tables (OECD, EU-SILC), scaled by the US
+  microdata, not from each country's own microdata. The moves are from 2012. The
+  tenure discount is the US one, scaled by how often renters move. European rent
+  factors for children are EU-SILC averages without an income control (some are noisy,
+  e.g. Lithuania 1.9 for two children).
 - **Young buyers.** Forward from today, couples who start with little saved rarely manage
   a down payment. For example, two US graduates at 25 buy at 68 in the default plan, while
   the US median first-time buyer is 40. This is today's prices and rates set against young

@@ -44,7 +44,7 @@ jobs:
         id: data
         run: echo "version=$(sed -n 's/^DATA_VERSION = "\(.*\)"/\1/p' econdata/version.py)" >> "$GITHUB_OUTPUT"
       # the built tables are kept between runs for each data version (as the server keeps
-      # them until the version changes); the download cache is not kept (~1 GB)
+      # them until the version changes)
       - name: Restore the built data
         id: cache
         uses: actions/cache/restore@v6
@@ -55,14 +55,27 @@ jobs:
             !econ_data/golden
             !econ_data/golden_app
           key: econ-data-v${{ steps.data.outputs.version }}
-      - name: Build the data (~10-20 min; only for a new data version)
+      # the downloads of the last build: a source that is down falls back to them, as on
+      # the server (which keeps its download cache) - not to nothing (~1.5 GB)
+      - name: Restore the download cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: econ_data/.cache
+          key: econ-downloads-${{ github.run_id }}
+          restore-keys: econ-downloads-
+      - name: Build the data (~20-30 min; only for a new data version)
         if: steps.cache.outputs.cache-hit != 'true'
         env:
           CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
         # exit 2 = some sources fell back to cached or reference values: still usable
-        run: |
-          python build_econ_dataset.py --out econ_data || [ $? -eq 2 ]
-          rm -rf econ_data/.cache
+        run: python build_econ_dataset.py --out econ_data || [ $? -eq 2 ]
+      - name: Keep the download cache
+        if: always() && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: econ_data/.cache
+          key: econ-downloads-${{ github.run_id }}
       - name: Keep the built data (even if a test fails below)
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6

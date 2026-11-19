@@ -37,4 +37,5 @@ from __future__ import annotations
 #      still "fitted" - e.g. the US 1.49 instead of ~1.3, as the US backtest also finds).
 #  14: labour_market: US history back to 2015 (CPS, one month a quarter), Eurostat slack
 #      by age back-cast before 2021, underemployment (too few hours or over-qualified).
-DATA_VERSION = "14"
+#  15: spending levels refitted with the renting rule (stay or move; rent ^0.4 with income).
+DATA_VERSION = "15"

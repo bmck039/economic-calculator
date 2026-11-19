@@ -1,6 +1,6 @@
 [project]
 name = "economic-calculator"
-version = "0.9.1"
+version = "0.9.2"
 description = "Simulate a couple's working life and retirement in Europe, the US and Canada from official statistics"
 requires-python = ">=3.10"
 

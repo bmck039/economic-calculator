@@ -60,6 +60,12 @@ def render(page) -> None:
         cd.rent_factor_src,
         " / ".join(f"{x:.2f}" for x in cd.rent_factor_per_child),
     )
+    if cd.rent_elasticity is not None:
+        add("new-lease rent vs income (elasticity)", cd.rent_elasticity)
+        add(
+            "renters' moves vs the US (and the tenure discount)",
+            cd.rent_elasticity.with_value(cd.renter_moves),
+        )
     add("unemployment rate", cd.unemployment_rate)
     add("exchange rate", cd.lcu_per_usd)
     add("PPP", cd.lcu_per_intl)

@@ -117,7 +117,7 @@ def derive_real_wages(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
     d = d.dropna(subset=["local", "cpi", "cpi_ref"])
     d["real_local"] = d["local"] * d["cpi_ref"] / d["cpi"]
     ppp = {c: ctx.intl(1.0, c, ref[c][1])[0] for c in d["iso3"].unique() if ref[c][1]}
-    d["real_intl_dollars"] = d["real_local"] * d["iso3"].map(ppp)
+    d["real_intl_dollars"] = d["real_local"] * pd.to_numeric(d["iso3"].map(ppp), errors="coerce")
     g = d.groupby(keys, sort=False)
     d["_n"] = g["year"].transform("size")
     d = d[d["_n"] >= 2]

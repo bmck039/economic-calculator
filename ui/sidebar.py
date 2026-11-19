@@ -441,7 +441,11 @@ def _housing(v: SimpleNamespace) -> None:
             float(round(v.cd.rent.value)),
             25.0,
             key=v.K("rent"),
-            help=src(v.cd.rent),
+            help=src(v.cd.rent)
+            + ". That is a new lease for a couple like you. Later years: you stay and "
+            "your rent rises a little less than market rents, or (as often as renting "
+            "couples your age move) you take a new lease that follows your income and "
+            "children. The rent shown is the expected one.",
         )
         v.buy_age = st.number_input(
             "Buy at P1 age",

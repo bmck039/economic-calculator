@@ -166,10 +166,13 @@ def test_baseline_accounting_identity():
 def test_real_display_removes_inflation():
     r = simulate(plan(real_wage_growth=0.0), country())
     real = to_display(r, country(), real=True)
-    # with zero real growth, real rent stays constant
-    assert real["rent"].iloc[0] == pytest.approx(real["rent"].iloc[10])
+    # with zero real growth, a new lease costs the same in real terms every year
+    assert real["rent_market"].iloc[0] == pytest.approx(real["rent_market"].iloc[10])
     nominal = to_display(r, country(), real=False)
-    assert nominal["rent"].iloc[10] == pytest.approx(nominal["rent"].iloc[0] * 1.02**10)
+    assert nominal["rent_market"].iloc[10] == pytest.approx(
+        nominal["rent_market"].iloc[0] * 1.02**10
+    )
+    assert nominal["rent"].iloc[10] / real["rent"].iloc[10] == pytest.approx(1.02**10)
 
 
 def test_currency_conversion():
@@ -300,3 +303,90 @@ def test_budget_constraint_off_shows_planned_spending():
     assert on["spending_squeeze"].sum() > 0
     assert off["spending_squeeze"].sum() == 0
     assert off["liquid"].min() < on["liquid"].min()
+
+
+# ------------------------------------------------------------------ renting
+def test_rent_stays_unless_the_household_moves():
+    from econsim.assumptions import RENTER_MOVES, TENURE_DISCOUNT
+
+    d = simulate(plan(real_wage_growth=0.0, rent=1200.0), country()).years
+    assert d["rent"].iloc[0] == pytest.approx(1200 * 12)  # your rent is your rent now
+    m = next(r for lim, r in RENTER_MOVES if 29 < lim)  # partner 1 is 29 in year 1
+    g = d["price_factor"].iloc[1] / d["price_factor"].iloc[0]  # market rents: prices
+    stay = 1200 * 12 * g * (1 - TENURE_DISCOUNT)
+    new = 1200 * 12 * g  # a new lease: the market (default rents are new leases)
+    assert d["rent_market"].iloc[1] == pytest.approx(new)
+    assert d["rent"].iloc[1] == pytest.approx((1 - m) * stay + m * new)
+    # no jumps: never more than a new lease, and rising slowly toward it
+    r = d["rent"] / d["price_factor"]
+    assert (r.diff().dropna() < 0.02 * 1200 * 12).all()
+    assert (d["rent"] <= d["rent_market"] + 1e-6).all()
+
+
+def test_rent_follows_income_with_the_measured_elasticity():
+    from econsim.assumptions import RENT_ELASTICITY
+
+    cd = country(budget_ref_income=S(40000.0))  # the survey couple's income
+    lo = simulate(plan(housing_elasticity=None), cd).years
+    hi = simulate(
+        plan(
+            housing_elasticity=None, earners=(Earner(28, pay_now=6000), Earner(27, pay_now=6000))
+        ),
+        cd,
+    ).years
+    inc = hi["net_income"].iloc[0] / lo["net_income"].iloc[0]
+    assert inc > 1.3
+    ratio = hi["rent"].iloc[0] / lo["rent"].iloc[0]
+    assert ratio == pytest.approx(inc**RENT_ELASTICITY, rel=0.15)  # not inc^0.75
+
+
+def test_children_raise_the_rent_gradually():
+    cd = country()
+    d = simulate(plan(child_ages=(32, None), rent=1000.0), cd).years
+    r = d["rent"] / d["price_factor"]
+    t = 4  # partner 1 is 32
+    mk = d["rent_market"]
+    jump = (mk.iloc[t] / mk.iloc[t - 1]) / (mk.iloc[t - 1] / mk.iloc[t - 2])  # vs the trend
+    assert jump == pytest.approx(cd.rent_factor_per_child[0])
+    assert r.iloc[t] / r.iloc[t - 1] < 1.04  # only the households that move pay more
+
+
+def test_unaffordable_rent_means_moving_somewhere_cheaper():
+    from econsim.assumptions import RENT_BURDEN_MAX, TENURE_DISCOUNT
+
+    # a high rent; at retirement income falls and a cheaper place is found
+    cd = country(budget_ref_income=S(40000.0))
+    p = plan(
+        earners=(Earner(60), Earner(60)),
+        horizon_age=70,
+        retirement_age=65,
+        housing_elasticity=0.4,
+        rent=3000.0,
+    )
+    d = simulate(p, cd).years
+    moved = 0
+    for t in range(1, len(d)):
+        g = d["rent_market"].iloc[t] / d["rent_market"].iloc[t - 1]
+        stay = d["rent"].iloc[t - 1] * (d["price_factor"].iloc[t] / d["price_factor"].iloc[t - 1])
+        stay *= 1.01 * (1 - TENURE_DISCOUNT)  # market rents: prices x real wages (1%)
+        cheaper = d["rent_market"].iloc[t] < stay
+        if cheaper and stay > RENT_BURDEN_MAX * d["net_income"].iloc[t] and g < 1:
+            assert d["rent"].iloc[t] == pytest.approx(d["rent_market"].iloc[t], rel=1e-3)
+            moved += 1
+    assert moved
+
+
+def test_renting_differs_by_country():
+    from econsim import params as P
+
+    de, us = P.renting("DEU"), P.renting("USA")
+    assert de is not None and us is not None
+    assert us[0].value == pytest.approx(0.4) and us[1] == 1.0
+    assert 0.1 < de[0].value < 0.8 and 0.05 < de[1] < 2.0  # measured, not the US
+    assert all(P.renting(i) is not None for i in ("FRA", "GBR", "SWE", "CAN", "LIE"))
+    # fewer moves: the rent stays closer to what you pay now
+    cd = country()
+    slow = simulate(plan(rent=1000.0), replace(cd, renter_moves=0.2)).years
+    fast = simulate(plan(rent=1000.0), replace(cd, renter_moves=1.0)).years
+    gap = lambda d: (d["rent_market"] - d["rent"]).iloc[5]  # noqa: E731
+    assert gap(slow) != gap(fast)

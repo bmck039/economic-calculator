@@ -1,0 +1,35 @@
+iso3,rent_elasticity,mover_scale,quality,source
+AUT,0.29,0.4,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.42 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 41% moved in 5 years vs US 73% (ACS 2013)"
+BEL,0.28,0.5,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.40 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 48% moved in 5 years vs US 73% (ACS 2013)"
+BGR,0.31,0.3,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 32% moved in 5 years vs US 73% (ACS 2013)
+HRV,0.31,0.41,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 42% moved in 5 years vs US 73% (ACS 2013)
+CYP,0.31,1.28,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 82% moved in 5 years vs US 73% (ACS 2013)
+CZE,0.31,0.17,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.43 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 20% moved in 5 years vs US 73% (ACS 2013)"
+DNK,0.22,0.6,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.31 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 55% moved in 5 years vs US 73% (ACS 2013)"
+EST,0.31,0.8,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 65% moved in 5 years vs US 73% (ACS 2013)
+FIN,0.27,0.75,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.38 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 63% moved in 5 years vs US 73% (ACS 2013)"
+FRA,0.47,0.56,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.67 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 52% moved in 5 years vs US 73% (ACS 2013)"
+DEU,0.36,0.33,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.51 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 36% moved in 5 years vs US 73% (ACS 2013)"
+GRC,0.29,0.32,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.41 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 35% moved in 5 years vs US 73% (ACS 2013)"
+HUN,0.31,0.51,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 49% moved in 5 years vs US 73% (ACS 2013)
+IRL,0.56,0.68,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.79 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 59% moved in 5 years vs US 73% (ACS 2013)"
+ITA,0.28,0.2,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.39 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 23% moved in 5 years vs US 73% (ACS 2013)"
+LVA,0.31,0.28,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 31% moved in 5 years vs US 73% (ACS 2013)
+LTU,0.31,0.97,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 72% moved in 5 years vs US 73% (ACS 2013)
+LUX,0.31,0.51,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.44 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 49% moved in 5 years vs US 73% (ACS 2013)"
+MLT,0.31,0.43,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 43% moved in 5 years vs US 73% (ACS 2013)
+NLD,0.26,0.3,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.37 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 33% moved in 5 years vs US 73% (ACS 2013)"
+POL,0.52,0.48,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.73 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 47% moved in 5 years vs US 73% (ACS 2013)"
+PRT,0.55,0.36,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.78 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 38% moved in 5 years vs US 73% (ACS 2013)"
+ROU,0.31,0.29,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 32% moved in 5 years vs US 73% (ACS 2013)
+SVK,0.31,0.15,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 18% moved in 5 years vs US 73% (ACS 2013)
+SVN,0.31,0.31,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 33% moved in 5 years vs US 73% (ACS 2013)
+ESP,0.4,0.55,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.56 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 52% moved in 5 years vs US 73% (ACS 2013)"
+SWE,0.22,0.67,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.31 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 58% moved in 5 years vs US 73% (ACS 2013)"
+ISL,0.31,1.58,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 88% moved in 5 years vs US 73% (ACS 2013)
+LIE,0.31,0.44,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 44% moved in 5 years vs US 73% (ACS 2013)
+NOR,0.31,1.05,B,rent vs income: median of the countries with data (too few tenants) 0.56; moves: EU-SILC 2012 ilc_hcmp05: 75% moved in 5 years vs US 73% (ACS 2013)
+CHE,0.38,0.44,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.53 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 44% moved in 5 years vs US 73% (ACS 2013)"
+GBR,0.36,1.12,B,"rent vs income: OECD AHD HC1.2.A2 x Eurostat ilc_di01, 0.51 vs US 0.56; moves: EU-SILC 2012 ilc_hcmp05: 77% moved in 5 years vs US 73% (ACS 2013)"
+USA,0.4,1.0,B,ACS PUMS (tools/rent_research.py)
+CAN,0.4,1.0,B,rent vs income: no comparable income shares: as the US 0.56; moves: no data: as the US moved in 5 years vs US 73% (ACS 2013)

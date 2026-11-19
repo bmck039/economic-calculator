@@ -146,7 +146,7 @@ def test_typical_student_debt_by_degree():
 def test_home_trend_runs_ten_years_then_follows_incomes():
     cd = life_cd(home_trend=Sourced(4.0, "%/yr", "test"), rent_trend=Sourced(2.0, "%/yr", "t"))
     y = simulate(plan(horizon_age=60, home_outlook="trend", real_wage_growth=1.0), cd).years
-    rent = y["rent"] / y["price_factor"]
+    rent = y["rent_market"] / y["price_factor"]  # what a new lease costs
     assert rent.iloc[10] / rent.iloc[0] == pytest.approx(1.02**10, rel=1e-6)
     assert rent.iloc[15] / rent.iloc[10] == pytest.approx(1.01**5, rel=1e-6)
 

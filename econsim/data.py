@@ -15,6 +15,7 @@ from typing import Optional
 import pandas as pd
 
 from . import params as P
+from .assumptions import RENT_CHILD_FACTOR
 from .career import CareerData, from_country
 from .cohort import CohortData, fit_all
 from .model import CountryData, Sourced, TaxPoint
@@ -362,6 +363,9 @@ class DataStore:
                     f"{r['source'].iloc[0]}, mean {r['from'].iloc[0]}-{r['to'].iloc[0]}"
                 )
                 upd["lend"] = lend
+        rn = P.renting(iso3)
+        if rn is not None:
+            upd["rent_elasticity"], upd["renter_moves"] = rn
         upd["notes"] = notes
         cd = replace(cd, **upd)
         cd = replace(cd, budget_ref_income=self._budget_ref_income(iso3, cd))
@@ -1088,14 +1092,16 @@ class DataStore:
             notes.append("No rent data: enter a monthly rent.")
         rf1 = self.life_item(iso3, "rent_factor_one_child")
         rf2 = self.life_item(iso3, "rent_factor_two_children")
-        rent_f = [rf1.value if rf1 else 1.15, rf2.value if rf2 else 1.30]
+        k1, k2 = RENT_CHILD_FACTOR
+        rent_f = [rf1.value if rf1 else k1, rf2.value if rf2 else k2]
         rent_f_src = rf1 or Sourced(
-            1.15,
+            k1,
             "ratio",
-            "assumption: +15% / +30% rent with 1 / 2 children (bigger home)",
-            None,
-            True,
-            "C",
+            f"Census ACS PUMS (US): +{k1 - 1:.0%} / +{k2 - 1:.0%} rent with 1 / 2 children: "
+            "married renters who moved in the last year, same income and area",
+            "2013-2023",
+            False,
+            "B",
         )
         return {
             "budget": budget,

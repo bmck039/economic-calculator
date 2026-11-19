@@ -31,6 +31,10 @@ from .assumptions import (
     PORTFOLIO_K,
     PRICE_TREND_YEARS,
     REFI_COUNTRIES,
+    RENT_BURDEN_MAX,
+    RENT_ELASTICITY,
+    RENTER_MOVES,
+    TENURE_DISCOUNT,
     WEALTH_MPC,
     WEALTH_MPC_DECLINE,
     YOUNG_DRIVER,
@@ -333,6 +337,9 @@ class _Simulation:
         """Starting savings, student loans and how savings are invested."""
         plan, cd, inp = self.plan, self.cd, self.inp
         self.h_scale0 = 1.0
+        self.rent_now: float | None = None  # this tenancy's rent (expected), nominal
+        self.rent_want0 = 1.0
+        self.H_prev = 1.0
         self.cash = self.start(inp["starting_savings"]["value"], self.sw_year("starting_savings"))
         self.retire = self.start(
             inp["starting_retirement"]["value"], self.sw_year("starting_retirement")
@@ -719,26 +726,6 @@ class _Simulation:
         y.scale = G
         rel_inc = 1.0  # income vs the survey couple's (same year)
         if self.ref0 and plan.budget_elasticity:
-            if self.owned:
-                housing_now = self.prev_housing
-            else:
-                housing_now = (
-                    self.rent0
-                    * y.H
-                    * (cd.rent_factor_per_child[min(y.n_home, 2) - 1] if y.n_home else 1.0)
-                )
-            y_perm = (
-                y.normal_net
-                - y.child_ben
-                - (housing_now if cd.budget_ref_housing is not None else 0.0)
-            ) / P
-            if y.retired and plan.spend_down:
-                # retirees also live off their savings, but draw them down slowly: about
-                # 1 / years left, as US minimum distributions (which most retirees'
-                # withdrawals track: Poterba, Venti & Wise) - returns above that build up
-                fin = max(self.cash + self.invest + self.retire, 0.0) / P
-                y_perm += fin / max(self.n_years - t, 1)
-            y.scale = spending_scale(plan, y_perm, self.ref0, G)
             # what the household can afford in housing and cars: its income before
             # housing vs the survey couple's (after housing it would feed back on itself)
             y_all = (y.normal_net - y.child_ben) / P
@@ -751,8 +738,25 @@ class _Simulation:
         y.h_scale = min(max(rel_inc, 0.25), 4.0) ** h_el
         if t == 0:
             self.h_scale0 = y.h_scale
-        if plan.rent is not None:  # your own rent is your rent now: only later changes
+        if plan.home_price is not None:  # your price is today's: only later changes
             y.h_scale = y.h_scale / self.h_scale0 if self.h_scale0 > 0 else 1.0
+        y.rent = y.rent_market = 0.0
+        if not self.owned:
+            y.rent = self._rent(y, rel_inc)
+        if self.ref0 and plan.budget_elasticity:
+            housing_now = self.prev_housing if self.owned else y.rent
+            y_perm = (
+                y.normal_net
+                - y.child_ben
+                - (housing_now if cd.budget_ref_housing is not None else 0.0)
+            ) / P
+            if y.retired and plan.spend_down:
+                # retirees also live off their savings, but draw them down slowly: about
+                # 1 / years left, as US minimum distributions (which most retirees'
+                # withdrawals track: Poterba, Venti & Wise) - returns above that build up
+                fin = max(self.cash + self.invest + self.retire, 0.0) / P
+                y_perm += fin / max(self.n_years - t, 1)
+            y.scale = spending_scale(plan, y_perm, self.ref0, G)
         c_scale = min(max(rel_inc, 0.25), 4.0) ** c_el
         lvl = self.lvl
         exp = y.exp = {
@@ -869,9 +873,6 @@ class _Simulation:
         """Rent - or, once the planned home is affordable, its purchase - then the
         mortgage and owner's costs, and the owned home following the price index."""
         cd, L, t, P = self.cd, self.L, y.t, y.P
-        rent_f = 1.0
-        if y.n_home:
-            rent_f = cd.rent_factor_per_child[min(y.n_home, 2) - 1]
         if not self.owned and self.buy_t_plan is not None and t >= self.buy_t_plan:
             self._try_to_buy(y)
         y.interest = 0.0
@@ -920,7 +921,39 @@ class _Simulation:
                 self.Pt[t + 1] / self.Pt[t] * self.Hh[t + 1] / self.Hh[t] * (1 + drift)
             )
         else:
-            y.exp["rent"] = self.rent0 * y.H * rent_f * y.h_scale
+            y.exp["rent"] = y.rent
+
+    def _rent(self, y: _Year, rel_inc: float) -> float:
+        """This year's rent while renting (expected over whether the household moves).
+        Staying, the rent rises with market rents less the discount sitting tenants get;
+        moving (the share of renting couples of that age who move each year, or anyone
+        whose rent passes RENT_BURDEN_MAX of income and could pay less), a new lease costs
+        what a couple with this income and these children pays now. The default rents are
+        new leases; your own rent keeps its gap to them."""
+        plan, cd = self.plan, self.cd
+        el = plan.housing_elasticity
+        if el is None:
+            el = cd.rent_elasticity.value if cd.rent_elasticity is not None else RENT_ELASTICITY
+        size = cd.rent_factor_per_child[min(y.n_home, 2) - 1] if y.n_home else 1.0
+        want = min(max(rel_inc, 0.25), 4.0) ** el * size  # vs the typical couple's rent
+        first = self.rent_now is None
+        if first:
+            self.rent_want0 = want
+        taste = 1 / self.rent_want0 if plan.rent is not None else 1.0
+        # the default rents are new leases (recent movers, asking rents)
+        market = y.rent_market = self.rent0 * y.H * want * taste
+        if first:  # first year renting: the rent given (or a new lease)
+            self.rent_now = market
+        else:
+            # a rent index follows all tenancies: a sitting tenant falls behind it by what
+            # leases reset on moving add - less where fewer renters move
+            stay = self.rent_now * y.H / self.H_prev * (1 - TENURE_DISCOUNT * cd.renter_moves)
+            m = min(next(r for lim, r in RENTER_MOVES if y.a1 < lim) * cd.renter_moves, 0.9)
+            if market < stay > RENT_BURDEN_MAX * y.normal_net:
+                m = 1.0
+            self.rent_now = (1 - m) * stay + m * market
+        self.H_prev = y.H
+        return self.rent_now
 
     def _try_to_buy(self, y: _Year) -> None:
         """Buy the planned home if the lenders' limits and the savings allow it."""
@@ -1168,6 +1201,7 @@ class _Simulation:
             "cash": self.cash,
             "invest": self.invest,
             "liquid": self.cash + self.invest,
+            "rent_market": y.rent_market,  # a new lease for this household now
             "home_value": self.home_value if owned else 0.0,
             "mortgage_balance": self.mort_bal if owned else 0.0,
             "mortgage_interest": y.interest,

@@ -105,6 +105,10 @@ class CountryData:
     lend: dict = field(default_factory=dict)  # lending.csv row (limits, taxes, ...)
     budget_ref_income: Optional[Sourced] = None  # net income of the survey households
     budget_ref_housing: Optional[Sourced] = None  # their housing costs excl. utilities
+    # renting (params/renting.csv): new-lease rent vs income, and how often renters move
+    # relative to the US (None / 1: the US values in econsim.assumptions)
+    rent_elasticity: Optional[Sourced] = None
+    renter_moves: float = 1.0
     unemp_youth: float = float("nan")  # % of labour force, 15-24
     unemp_total: float = float("nan")  # %, 15-74
     cpi: dict = field(default_factory=dict)  # year -> CPI index (rolls old data)

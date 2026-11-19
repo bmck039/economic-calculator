@@ -346,7 +346,13 @@ def worldbank(
         url = WB_API.format(c=";".join(iso3), i=indicator)
         try:
             js = json.loads(
-                f.get(url, params, label=f"worldbank:{indicator}:{src}", validate=is_json)
+                f.get(
+                    url,
+                    params,
+                    label=f"worldbank:{indicator}:{src}",
+                    validate=is_json,
+                    timeout=120,  # all countries at once: slow at times
+                )
             )
         except FetchError as e:
             last = e

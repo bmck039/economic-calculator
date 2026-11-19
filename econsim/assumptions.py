@@ -19,7 +19,9 @@ PORTFOLIO_K = 1.0  # free savings (years of income) at which a household's
 #                                   mix is halfway from typical households' (bottom 70%) to
 #                                   the whole household sector's (led by the wealthiest)
 WEALTH_MPC_DECLINE = 0.0  # share of savings spent x (1 + savings/income)^-this
-HOUSING_ELASTICITY = 0.75  # rent / home price vs income relative to the survey couple
+HOUSING_ELASTICITY = 0.75  # home price vs income relative to the survey couple (owners'
+#                                   permanent-income elasticity 0.5-0.7 in the literature,
+#                                   Mayo 1981; ~1 with education as the instrument, ACS)
 CAR_ELASTICITY = 0.25  # car costs vs the same
 SCALE_BOUNDS = (0.25, 4.0)  # spending vs the survey couple's, at the extremes of income
 HOME_DRIFT = ((999, 0.0),)  # owned home vs the price index, by age: none - a repeat-
@@ -84,6 +86,37 @@ LTC_DEFAULT = {
     )
 }
 CHURCH_TAX = {"DEU": 0.085}  # share of income tax (8% BY/BW, 9% elsewhere)
+
+# ---------------------------------------------------------------- renting
+# Measured on US microdata (tools/rent_research.py: Census ACS PUMS 2013/2018/2023, married
+# renters, within the same area; CPS ASEC 2023-2025). Each country's elasticity and how
+# often its renters move relative to the US: params/renting.csv (OECD, EU-SILC).
+RENT_ELASTICITY = 0.4  # US: rent of a new lease vs (permanent) income: 0.41-0.43 with
+#                        education x age as the instrument (0.2 on one year's income);
+#                        renter-movers 0.38 (Goodman & Kawai 1986), most studies 0.3-0.5
+#                        (Mayo 1981)
+TENURE_DISCOUNT = 0.015  # sitting tenants' rent rises this much less a year than market
+#                          rents: -7 to -8% after 2-4 years, -13 to -17% after 5-9 (2013,
+#                          2018; same size of home, area, income - partly tenants keeping
+#                          cheap homes); Austria 1.3%/yr (Knell 2025), Canada -19% after
+#                          5+ years (StatCan 2025). x the country's mover_scale: the
+#                          rent index follows all tenancies, and leases reset on moving
+#                          are what lift it above a sitting tenant's rent
+RENTER_MOVES = (  # US: married renters who moved in the last year, by age (CPS ASEC);
+    #               x the country's renting.csv mover_scale
+    (25, 0.35),
+    (30, 0.285),
+    (35, 0.19),
+    (40, 0.163),
+    (45, 0.116),
+    (55, 0.096),
+    (65, 0.102),
+    (999, 0.054),
+)
+RENT_BURDEN_MAX = 0.6  # rent above this share of net income (HUD's "severe" burden: half
+#                        of gross income) and a cheaper place is found: move
+RENT_CHILD_FACTOR = (1.07, 1.16)  # new lease with 1 / 2+ children vs none, same income and
+#                                   area (ACS: +5-8% / +11-16%); a country's own data first
 
 # ---------------------------------------------------------------- homes and mortgages
 CH_STYLE = {"CHE", "LIE"}  # interest-only first mortgage, 2nd tranche amortised

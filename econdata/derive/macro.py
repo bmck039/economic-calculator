@@ -62,7 +62,8 @@ def derive_context(long: pd.DataFrame, ctx: Ctx) -> pd.DataFrame:
         )
         parts.append(g.assign(indicator=ind))
     cpi = pd.DataFrame(
-        [{"iso3": c, "year": y, "value": v} for (c, y), v in ctx._wb["cpi_index"].items()]
+        [{"iso3": c, "year": y, "value": v} for (c, y), v in ctx._wb["cpi_index"].items()],
+        columns=["iso3", "year", "value"],  # empty when the World Bank was unreachable
     ).sort_values(["iso3", "year"])
     if not cpi.empty:
         cpi["value"] = cpi.groupby("iso3")["value"].pct_change() * 100

@@ -91,6 +91,17 @@ def lending(iso3: str) -> dict:
     return out
 
 
+def renting(iso3: str) -> tuple[Sourced, float] | None:
+    """(new-lease rent elasticity vs income, renters' moves vs the US) - renting.csv,
+    written by tools/rent_research.py."""
+    t = _wide("renting")
+    if iso3 not in t.index:
+        return None
+    r = t.loc[iso3]
+    el = Sourced(_num(r["rent_elasticity"]), "elasticity", str(r["source"]), None, False)
+    return el.with_value(el.value, quality=str(r["quality"])), _num(r["mover_scale"], 1.0)
+
+
 def household(iso3: str) -> dict[str, float]:
     t = _wide("household")
     if iso3 not in t.index:
